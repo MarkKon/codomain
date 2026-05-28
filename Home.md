@@ -10,7 +10,7 @@ Try these Obsidian-style links:
 
 Inline math should render, for example $E = mc^2$.
 
-Display math should render too:
+Display math should render too: but I don't know $\forall$
 
 $$
 \int_0^1 x^2\,dx = \frac{1}{3}

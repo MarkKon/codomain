@@ -1,6 +1,9 @@
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import katex from "katex";
+import { createMarkdownPreview, escapeHtml } from "./markdownPreview.js";
 import "katex/dist/katex.min.css";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
@@ -10,58 +13,85 @@ const { listen } = window.__TAURI__.event;
 
 const state = {
   root: "",
-  currentPath: "README.md",
-  currentContent: "",
   mode: "split",
   terminal: null,
   fit: null,
+  unicode: null,
+  webgl: null,
   resizeObserver: null,
   fitFrame: null,
   previewRefreshTimer: null,
   previewRefreshInFlight: false,
+  previewHistoryIndex: 0,
+  previewHistoryGeneration: 0,
+  handlingPopState: false,
 };
 
 document.querySelector("#app").innerHTML = `
   <main class="shell" data-mode="split">
-    <header class="topbar">
-      <div class="brand">
-        <span class="mark"></span>
-        <div>
-          <strong>Codomain</strong>
-          <small id="rootLabel"></small>
-        </div>
-      </div>
+    <header class="topbar" data-tauri-drag-region>
+      <button class="path-label" id="rootLabel" title="Choose root folder"></button>
       <div class="mode-switch" role="group" aria-label="View mode">
-        <button data-mode-target="nvim" title="Neovim full view">NV</button>
-        <button data-mode-target="split" title="Split view">SP</button>
-        <button data-mode-target="markdown" title="Markdown full view">MD</button>
+        <button data-mode-target="nvim" title="Neovim full view" aria-label="Neovim full view">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 5h14v14H5z" />
+            <path d="m9 9 3 3-3 3" />
+            <path d="M13 15h3" />
+          </svg>
+        </button>
+        <button data-mode-target="split" title="Split view" aria-label="Split view">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 5h14v14H5z" />
+            <path d="M12 5v14" />
+          </svg>
+        </button>
+        <button data-mode-target="markdown" title="Markdown full view" aria-label="Markdown full view">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16v10H4z" />
+            <path d="M7 14v-4l2 2 2-2v4" />
+            <path d="M14 10v4" />
+            <path d="m12.5 12.5 1.5 1.5 1.5-1.5" />
+          </svg>
+        </button>
       </div>
     </header>
     <section class="workspace">
       <section class="pane pane-terminal" aria-label="Neovim">
-        <div class="pane-header">
-          <span>Neovim</span>
-          <kbd>Ctrl+1</kbd>
-        </div>
         <div id="terminal"></div>
       </section>
       <section class="pane pane-markdown" aria-label="Markdown preview">
-        <div class="pane-header">
-          <span id="fileLabel">Markdown</span>
-          <kbd>Ctrl+3</kbd>
-        </div>
         <article id="preview" class="preview"></article>
+        <div class="preview-nav" role="group" aria-label="Markdown history">
+          <button id="previewBack" title="Back" aria-label="Back">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+          </button>
+          <button id="previewForward" title="Forward" aria-label="Forward">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+          </button>
+        </div>
       </section>
     </section>
   </main>
 `;
 
 const rootLabel = document.querySelector("#rootLabel");
-const fileLabel = document.querySelector("#fileLabel");
+const previewBackButton = document.querySelector("#previewBack");
+const previewForwardButton = document.querySelector("#previewForward");
 const preview = document.querySelector("#preview");
 const shell = document.querySelector(".shell");
 const terminalPane = document.querySelector(".pane-terminal");
+const markdownPane = document.querySelector(".pane-markdown");
 const terminalHost = document.querySelector("#terminal");
+const markdownPreview = createMarkdownPreview({
+  host: preview,
+  renderMath,
+  openWikilink: ({ fromPath, target }) =>
+    invoke("open_wikilink_in_neovim", { fromPath, target }),
+  onPathTransition: (previousPath, nextPath) => {
+    recordPreviewHistory(previousPath, nextPath);
+    syncPreviewNavButtons();
+  },
+});
 
 boot().catch((error) => {
   preview.innerHTML = `<div class="empty-state"><h1>Codomain could not start</h1><p>${escapeHtml(String(error))}</p></div>`;
@@ -70,13 +100,44 @@ boot().catch((error) => {
 async function boot() {
   state.root = await invoke("initialize_root");
   rootLabel.textContent = state.root;
+  rootLabel.addEventListener("click", chooseRootFolder);
   setupModes();
+  setupPreviewNavigation();
   setupTerminal();
   await startTerminal();
-  await loadMarkdown(state.currentPath, true);
+  await loadMarkdown("README.md", true);
   await listen("nvim://buffer-changed", schedulePreviewRefresh);
+  await listen("codomain://set-mode", (event) => setMode(event.payload));
   focusTerminal();
   window.setInterval(refreshFromNeovim, 1000);
+}
+
+async function chooseRootFolder() {
+  try {
+    const root = await invoke("choose_root_folder", { currentRoot: state.root });
+    if (!root || root === state.root) return;
+    await changeRoot(root);
+  } catch (error) {
+    markdownPreview.showError("Could not change root folder", error);
+  }
+}
+
+async function changeRoot(root) {
+  await invoke("stop_neovim");
+  state.root = root;
+  rootLabel.textContent = root;
+  markdownPreview.reset();
+  resetPreviewHistoryState();
+  state.terminal.reset();
+  fitTerminalNow();
+  await invoke("start_neovim", {
+    root: state.root,
+    rows: state.terminal.rows,
+    cols: state.terminal.cols,
+  });
+  await loadMarkdown("README.md", true);
+  scheduleTerminalFit();
+  focusTerminal();
 }
 
 function setupModes() {
@@ -85,7 +146,24 @@ function setupModes() {
   });
 
   window.addEventListener("keydown", (event) => {
-    if (!event.ctrlKey) return;
+    const hasPrimaryModifier = event.metaKey || event.ctrlKey;
+    if (!hasPrimaryModifier || event.altKey) return;
+
+    if (event.key === "=" || event.key === "+") {
+      event.preventDefault();
+      zoomIn();
+      return;
+    }
+    if (event.key === "-") {
+      event.preventDefault();
+      zoomOut();
+      return;
+    }
+    if (event.key === "0") {
+      event.preventDefault();
+      resetZoom();
+      return;
+    }
     if (event.key === "1") {
       event.preventDefault();
       setMode("nvim");
@@ -99,6 +177,8 @@ function setupModes() {
       setMode("markdown");
     }
   });
+
+  setMode(state.mode);
 }
 
 function setMode(mode) {
@@ -113,34 +193,104 @@ function setMode(mode) {
   }, 50);
 }
 
+function setupPreviewNavigation() {
+  resetPreviewHistoryState();
+  previewBackButton.addEventListener("click", async () => {
+    if (!markdownPreview.canGoBack()) return;
+    window.history.back();
+    focusTerminal();
+  });
+  previewForwardButton.addEventListener("click", async () => {
+    if (!markdownPreview.canGoForward()) return;
+    window.history.forward();
+    focusTerminal();
+  });
+  window.addEventListener("popstate", async (event) => {
+    const generation = Number(event.state?.previewGeneration);
+    const nextIndex = Number(event.state?.previewIndex);
+    if (
+      !Number.isFinite(generation) ||
+      generation !== state.previewHistoryGeneration ||
+      !Number.isFinite(nextIndex)
+    ) {
+      window.history.replaceState(currentPreviewHistoryState(), "", window.location.href);
+      return;
+    }
+    const direction = nextIndex - state.previewHistoryIndex;
+    state.handlingPopState = true;
+    try {
+      const file =
+        direction < 0 ? markdownPreview.goBack() : direction > 0 ? markdownPreview.goForward() : null;
+      if (file) await activateMarkdownFile(file.path);
+      state.previewHistoryIndex = nextIndex;
+      syncPreviewNavButtons();
+    } finally {
+      state.handlingPopState = false;
+      focusTerminal();
+    }
+  });
+  window.addEventListener("mouseup", async (event) => {
+    if (event.button === 3 && markdownPreview.canGoBack()) {
+      window.history.back();
+      focusTerminal();
+    }
+    if (event.button === 4 && markdownPreview.canGoForward()) {
+      window.history.forward();
+      focusTerminal();
+    }
+  });
+  markdownPane.addEventListener("pointerup", focusTerminal);
+  markdownPane.addEventListener("click", focusTerminal);
+  syncPreviewNavButtons();
+}
+
+function syncPreviewNavButtons() {
+  previewBackButton.disabled = !markdownPreview.canGoBack();
+  previewForwardButton.disabled = !markdownPreview.canGoForward();
+}
+
+function zoomIn() {
+  invoke("zoom_in").catch(() => {});
+}
+
+function zoomOut() {
+  invoke("zoom_out").catch(() => {});
+}
+
+function resetZoom() {
+  invoke("reset_zoom").catch(() => {});
+}
+
 function setupTerminal() {
   state.terminal = new Terminal({
+    allowProposedApi: true,
     cursorBlink: true,
     convertEol: true,
-    fontFamily: '"Berkeley Mono", "SFMono-Regular", ui-monospace, monospace',
+    fontFamily: '"SF Mono", "SFMono-Regular", "Symbols Nerd Font Mono", ui-monospace, monospace',
     fontSize: 13,
+    letterSpacing: 0,
     lineHeight: 1.1,
     theme: {
       background: "#101214",
-      foreground: "#e6e0d6",
-      cursor: "#f4c95d",
+      foreground: "#d8dee9",
+      cursor: "#d8dee9",
       selectionBackground: "#315d5f",
       black: "#101214",
       red: "#df5b61",
       green: "#78b892",
-      yellow: "#deba6f",
+      yellow: "#c6a15b",
       blue: "#6791c9",
       magenta: "#bc83e3",
       cyan: "#67afc1",
-      white: "#e6e0d6",
+      white: "#d8dee9",
       brightBlack: "#5b6268",
       brightRed: "#f16269",
       brightGreen: "#8fceaa",
-      brightYellow: "#eecb82",
+      brightYellow: "#d5b26a",
       brightBlue: "#79a8e4",
       brightMagenta: "#d09bf1",
       brightCyan: "#7bc2d3",
-      brightWhite: "#f7f3ee",
+      brightWhite: "#eceff4",
     },
   });
   state.terminal.attachCustomKeyEventHandler((event) => {
@@ -152,8 +302,21 @@ function setupTerminal() {
     return true;
   });
   state.fit = new FitAddon();
+  state.unicode = new Unicode11Addon();
+  state.webgl = new WebglAddon();
   state.terminal.loadAddon(state.fit);
+  state.terminal.loadAddon(state.unicode);
+  state.terminal.unicode.activeVersion = "11";
   state.terminal.open(terminalHost);
+  try {
+    state.terminal.loadAddon(state.webgl);
+    state.webgl.onContextLoss(() => {
+      state.webgl.dispose();
+      state.webgl = null;
+    });
+  } catch {
+    state.webgl = null;
+  }
   state.terminal.onData(sendNeovimInput);
   terminalPane.addEventListener("pointerdown", focusTerminal);
   terminalPane.addEventListener("click", focusTerminal);
@@ -218,10 +381,13 @@ function shouldForwardRepeatedPrintableKey(event) {
 async function loadMarkdown(path, tolerateMissing = false) {
   try {
     const file = await invoke("read_markdown", { root: state.root, path });
-    renderFile(file);
+    const previousPath = markdownPreview.currentPath();
+    if (markdownPreview.renderFile(file)) recordPreviewHistory(previousPath, file.path);
+    syncPreviewNavButtons();
   } catch (error) {
     if (!tolerateMissing) throw error;
-    preview.innerHTML = `<div class="empty-state"><h1>No Markdown file selected</h1><p>Create or open a Markdown file in this workspace, then use Obsidian-style links from this pane.</p></div>`;
+    markdownPreview.showEmpty();
+    syncPreviewNavButtons();
   }
 }
 
@@ -230,13 +396,43 @@ async function refreshFromNeovim() {
   state.previewRefreshInFlight = true;
   try {
     const file = await invoke("read_current_neovim_markdown");
-    if (!file || (file.path === state.currentPath && file.content === state.currentContent)) return;
-    renderFile(file);
+    if (!file) return;
+    const previousPath = markdownPreview.currentPath();
+    if (markdownPreview.renderFile(file)) {
+      recordPreviewHistory(previousPath, file.path);
+      syncPreviewNavButtons();
+    }
   } catch {
     // Neovim can briefly reject remote calls while starting or exiting.
   } finally {
     state.previewRefreshInFlight = false;
   }
+}
+
+function recordPreviewHistory(previousPath, nextPath) {
+  if (!nextPath || previousPath === nextPath) return;
+  if (state.handlingPopState) return;
+  state.previewHistoryIndex += 1;
+  window.history.pushState(currentPreviewHistoryState(), "", window.location.href);
+}
+
+function resetPreviewHistoryState() {
+  state.previewHistoryGeneration += 1;
+  state.previewHistoryIndex = 0;
+  state.handlingPopState = false;
+  window.history.replaceState(currentPreviewHistoryState(), "", window.location.href);
+  syncPreviewNavButtons();
+}
+
+function currentPreviewHistoryState() {
+  return {
+    previewGeneration: state.previewHistoryGeneration,
+    previewIndex: state.previewHistoryIndex,
+  };
+}
+
+async function activateMarkdownFile(path) {
+  await invoke("open_markdown_in_neovim", { path });
 }
 
 function schedulePreviewRefresh() {
@@ -247,159 +443,6 @@ function schedulePreviewRefresh() {
   }, 80);
 }
 
-function bindPreviewLinks() {
-  preview.querySelectorAll("[data-wikilink]").forEach((link) => {
-    link.addEventListener("click", async (event) => {
-      event.preventDefault();
-      const target = link.dataset.wikilink;
-      try {
-        const file = await invoke("open_wikilink_in_neovim", {
-          fromPath: state.currentPath,
-          target,
-        });
-        renderFile(file);
-        preview.scrollTop = 0;
-      } catch (error) {
-        showPreviewError(`Could not open [[${target}]]`, error);
-      }
-    });
-  });
-}
-
-function renderFile(file) {
-  state.currentPath = file.path;
-  state.currentContent = file.content;
-  fileLabel.textContent = file.path;
-  preview.innerHTML = renderMarkdown(file.content);
-  bindPreviewLinks();
-}
-
-function showPreviewError(title, error) {
-  const message = document.createElement("div");
-  message.className = "preview-error";
-  message.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(String(error))}</span>`;
-  preview.prepend(message);
-}
-
-function renderMarkdown(markdown) {
-  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-  const html = [];
-  let inList = false;
-  let inCode = false;
-  let inMath = false;
-  let code = [];
-  let math = [];
-
-  for (const line of lines) {
-    if (line.trim() === "$$") {
-      if (inList) {
-        html.push("</ul>");
-        inList = false;
-      }
-      if (inMath) {
-        html.push(renderMathBlock(math.join("\n")));
-        math = [];
-      }
-      inMath = !inMath;
-      continue;
-    }
-
-    if (inMath) {
-      math.push(line);
-      continue;
-    }
-
-    const singleLineMath = line.match(/^\s*\$\$(.+)\$\$\s*$/);
-    if (singleLineMath) {
-      if (inList) {
-        html.push("</ul>");
-        inList = false;
-      }
-      html.push(renderMathBlock(singleLineMath[1].trim()));
-      continue;
-    }
-
-    if (line.startsWith("```")) {
-      if (inCode) {
-        html.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
-        code = [];
-      }
-      inCode = !inCode;
-      continue;
-    }
-
-    if (inCode) {
-      code.push(line);
-      continue;
-    }
-
-    const listMatch = line.match(/^\s*[-*]\s+(.+)$/);
-    if (listMatch) {
-      if (!inList) html.push("<ul>");
-      inList = true;
-      html.push(`<li>${inlineMarkdown(listMatch[1])}</li>`);
-      continue;
-    }
-    if (inList) {
-      html.push("</ul>");
-      inList = false;
-    }
-
-    if (/^#{1,6}\s/.test(line)) {
-      const level = line.match(/^#+/)[0].length;
-      html.push(`<h${level}>${inlineMarkdown(line.slice(level).trim())}</h${level}>`);
-    } else if (line.trim() === "") {
-      html.push("");
-    } else {
-      html.push(`<p>${inlineMarkdown(line)}</p>`);
-    }
-  }
-
-  if (inList) html.push("</ul>");
-  if (inCode) html.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
-  if (inMath) html.push(renderMathBlock(math.join("\n")));
-  return html.join("\n");
-}
-
-function inlineMarkdown(text) {
-  const tokens = /(`[^`]+`|\[\[[^\]]+\]\]|\*\*[^*]+\*\*|\$[^$\n]+\$)/g;
-  let html = "";
-  let cursor = 0;
-  for (const match of text.matchAll(tokens)) {
-    html += escapeHtml(text.slice(cursor, match.index));
-    html += renderInlineToken(match[0]);
-    cursor = match.index + match[0].length;
-  }
-  html += escapeHtml(text.slice(cursor));
-  return html;
-}
-
-function renderInlineToken(token) {
-  if (token.startsWith("`")) {
-    return `<code>${escapeHtml(token.slice(1, -1))}</code>`;
-  }
-
-  if (token.startsWith("[[")) {
-    const body = token.slice(2, -2);
-    const [target, label] = body.split("|");
-    return `<a href="#" data-wikilink="${escapeHtml(target)}">${escapeHtml(label || target)}</a>`;
-  }
-
-  if (token.startsWith("**")) {
-    return `<strong>${inlineMarkdown(token.slice(2, -2))}</strong>`;
-  }
-
-  if (token.startsWith("$")) {
-    return renderMath(token.slice(1, -1), false);
-  }
-
-  return escapeHtml(token);
-}
-
-function renderMathBlock(source) {
-  return `<div class="math-block">${renderMath(source, true)}</div>`;
-}
-
 function renderMath(source, displayMode) {
   return katex.renderToString(source, {
     displayMode,
@@ -407,13 +450,4 @@ function renderMath(source, displayMode) {
     strict: "ignore",
     trust: false,
   });
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }
