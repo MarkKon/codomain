@@ -72,8 +72,9 @@ async function boot() {
   setupTerminal();
   await startTerminal();
   await loadMarkdown(state.currentPath, true);
+  await listen("nvim://buffer-changed", refreshFromNeovim);
   focusTerminal();
-  window.setInterval(refreshFromNeovim, 350);
+  window.setInterval(refreshFromNeovim, 1000);
 }
 
 function setupModes() {

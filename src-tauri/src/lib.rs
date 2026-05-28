@@ -1,20 +1,26 @@
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use rmpv::{decode::read_value, encode::write_value, Value};
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     fs,
     io::{BufReader, Read, Write},
+    os::unix::net::UnixStream,
     path::{Component, Path, PathBuf},
-    process::Command,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
+    time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager};
 
 struct NvimSession {
     root: PathBuf,
-    listen_path: PathBuf,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
+    rpc: Arc<NvimRpc>,
     child: Box<dyn Child + Send + Sync>,
 }
 
@@ -27,6 +33,183 @@ struct AppState {
 struct MarkdownFile {
     path: String,
     content: String,
+}
+
+type PendingResponse = mpsc::Sender<Result<Value, String>>;
+
+struct NvimRpc {
+    writer: Mutex<UnixStream>,
+    pending: Mutex<HashMap<u64, PendingResponse>>,
+    next_request_id: AtomicU64,
+}
+
+impl NvimRpc {
+    fn connect(socket_path: &Path, app: tauri::AppHandle) -> Result<Arc<Self>, String> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let stream = loop {
+            match UnixStream::connect(socket_path) {
+                Ok(stream) => break stream,
+                Err(err) if Instant::now() < deadline => {
+                    let _ = err;
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(err) => return Err(format!("failed to connect to Neovim RPC socket: {err}")),
+            }
+        };
+
+        let reader = stream.try_clone().map_err(|err| err.to_string())?;
+        let rpc = Arc::new(Self {
+            writer: Mutex::new(stream),
+            pending: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(1),
+        });
+
+        let reader_rpc = Arc::clone(&rpc);
+        thread::spawn(move || read_rpc_loop(reader, reader_rpc, app));
+
+        Ok(rpc)
+    }
+
+    fn request(&self, method: &str, params: Vec<Value>) -> Result<Value, String> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        self.pending
+            .lock()
+            .map_err(|err| err.to_string())?
+            .insert(request_id, sender);
+
+        let message = Value::Array(vec![
+            Value::from(0),
+            Value::from(request_id),
+            Value::from(method),
+            Value::Array(params),
+        ]);
+
+        let write_result = (|| {
+            let mut writer = self.writer.lock().map_err(|err| err.to_string())?;
+            write_value(&mut *writer, &message).map_err(|err| err.to_string())?;
+            writer.flush().map_err(|err| err.to_string())
+        })();
+
+        if let Err(err) = write_result {
+            let _ = self
+                .pending
+                .lock()
+                .map_err(|lock_err| lock_err.to_string())?
+                .remove(&request_id);
+            return Err(err);
+        }
+
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|err| err.to_string())?
+    }
+}
+
+fn read_rpc_loop(mut reader: UnixStream, rpc: Arc<NvimRpc>, app: tauri::AppHandle) {
+    while let Ok(value) = read_value(&mut reader) {
+        let Some(items) = value.as_array() else {
+            continue;
+        };
+        let Some(message_type) = items.first().and_then(Value::as_u64) else {
+            continue;
+        };
+
+        match message_type {
+            1 => handle_rpc_response(items, &rpc),
+            2 => handle_rpc_notification(items, &app),
+            _ => {}
+        }
+    }
+}
+
+fn handle_rpc_response(items: &[Value], rpc: &NvimRpc) {
+    let Some(request_id) = items.get(1).and_then(Value::as_u64) else {
+        return;
+    };
+    let error = items.get(2).cloned().unwrap_or(Value::Nil);
+    let result = items.get(3).cloned().unwrap_or(Value::Nil);
+    let response = if error.is_nil() {
+        Ok(result)
+    } else {
+        Err(value_to_string(&error))
+    };
+
+    if let Ok(mut pending) = rpc.pending.lock() {
+        if let Some(sender) = pending.remove(&request_id) {
+            let _ = sender.send(response);
+        }
+    }
+}
+
+fn handle_rpc_notification(items: &[Value], app: &tauri::AppHandle) {
+    let Some(method) = items.get(1).and_then(value_as_str) else {
+        return;
+    };
+
+    if method == "codomain_buffer_changed" {
+        let _ = app.emit("nvim://buffer-changed", ());
+    }
+}
+
+fn install_codomain_autocmds(rpc: &NvimRpc) -> Result<(), String> {
+    let api_info = rpc.request("nvim_get_api_info", vec![])?;
+    let channel_id = api_info
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "Neovim did not return an RPC channel id".to_string())?;
+    let lua = format!(
+        r#"
+local channel = {channel_id}
+local group = vim.api.nvim_create_augroup("CodomainBufferSync", {{ clear = true }})
+local function notify_codomain()
+  vim.schedule(function()
+    pcall(vim.rpcnotify, channel, "codomain_buffer_changed")
+  end)
+end
+vim.api.nvim_create_autocmd({{ "BufEnter", "BufWritePost", "TextChanged", "TextChangedI" }}, {{
+  group = group,
+  callback = notify_codomain,
+}})
+notify_codomain()
+"#
+    );
+
+    let _ = rpc.request("nvim_exec_lua", vec![Value::from(lua), Value::Array(vec![])])?;
+    Ok(())
+}
+
+fn value_as_str(value: &Value) -> Option<&str> {
+    value.as_str()
+}
+
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::Nil => String::new(),
+        Value::String(text) => text.as_str().unwrap_or("").to_string(),
+        Value::Array(items) => items
+            .iter()
+            .map(value_to_string)
+            .collect::<Vec<_>>()
+            .join(" "),
+        other => other.to_string(),
+    }
+}
+
+fn value_lines_to_string(value: &Value) -> Result<String, String> {
+    let lines = value
+        .as_array()
+        .ok_or_else(|| "Neovim did not return buffer lines".to_string())?;
+    lines
+        .iter()
+        .map(|line| {
+            value_as_str(line)
+                .map(ToString::to_string)
+                .ok_or_else(|| "Neovim returned a non-string buffer line".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|lines| lines.join("\n"))
 }
 
 #[tauri::command]
@@ -90,12 +273,14 @@ fn start_neovim(app: tauri::AppHandle, root: String, rows: u16, cols: u16) -> Re
     });
 
     let writer = pair.master.take_writer().map_err(|err| err.to_string())?;
+    let rpc = NvimRpc::connect(&listen_path, app.clone())?;
+    install_codomain_autocmds(&rpc)?;
 
     *session = Some(NvimSession {
         root,
-        listen_path,
         master: pair.master,
         writer,
+        rpc,
         child,
     });
 
@@ -143,27 +328,19 @@ fn read_markdown(root: String, path: String) -> Result<MarkdownFile, String> {
 #[tauri::command]
 fn read_current_neovim_markdown(app: tauri::AppHandle) -> Result<Option<MarkdownFile>, String> {
     let state = app.state::<AppState>();
-    let session = state.session.lock().map_err(|err| err.to_string())?;
-    let session = session
-        .as_ref()
-        .ok_or_else(|| "neovim has not been started".to_string())?;
+    let (root, rpc) = {
+        let session = state.session.lock().map_err(|err| err.to_string())?;
+        let session = session
+            .as_ref()
+            .ok_or_else(|| "neovim has not been started".to_string())?;
+        (session.root.clone(), Arc::clone(&session.rpc))
+    };
 
-    let output = Command::new("nvim")
-        .arg("--server")
-        .arg(&session.listen_path)
-        .arg("--remote-expr")
-        .arg("expand('%:p')")
-        .output()
-        .map_err(|err| err.to_string())?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-
-    let absolute = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .trim_matches('\'')
-        .to_string();
+    let buffer = rpc.request("nvim_get_current_buf", vec![])?;
+    let name = rpc.request("nvim_buf_get_name", vec![buffer.clone()])?;
+    let Some(absolute) = value_as_str(&name) else {
+        return Ok(None);
+    };
     if absolute.is_empty() {
         return Ok(None);
     }
@@ -174,17 +351,25 @@ fn read_current_neovim_markdown(app: tauri::AppHandle) -> Result<Option<Markdown
     }
 
     let canonical = fs::canonicalize(&path).map_err(|err| err.to_string())?;
-    if !canonical.starts_with(&session.root) {
+    if !canonical.starts_with(&root) {
         return Ok(None);
     }
 
     let relative = canonical
-        .strip_prefix(&session.root)
+        .strip_prefix(&root)
         .map_err(|err| err.to_string())?
         .to_string_lossy()
         .to_string();
+    let lines = rpc.request(
+        "nvim_buf_get_lines",
+        vec![buffer, Value::from(0), Value::from(-1), Value::Boolean(true)],
+    )?;
+    let content = value_lines_to_string(&lines)?;
 
-    read_markdown(session.root.to_string_lossy().to_string(), relative).map(Some)
+    Ok(Some(MarkdownFile {
+        path: relative,
+        content,
+    }))
 }
 
 #[tauri::command]
@@ -201,12 +386,12 @@ fn open_wikilink_in_neovim(
     target: String,
 ) -> Result<MarkdownFile, String> {
     let state = app.state::<AppState>();
-    let (root, listen_path) = {
+    let (root, rpc) = {
         let session = state.session.lock().map_err(|err| err.to_string())?;
         let session = session
             .as_ref()
             .ok_or_else(|| "neovim has not been started".to_string())?;
-        (session.root.clone(), session.listen_path.clone())
+        (session.root.clone(), Arc::clone(&session.rpc))
     };
 
     let file_path = resolve_wikilink_path(&root, &from_path, &target)?;
@@ -220,19 +405,10 @@ fn open_wikilink_in_neovim(
         vim_single_quote_escape(&file_path.to_string_lossy())
     );
 
-    let output = Command::new("nvim")
-        .arg("--server")
-        .arg(&listen_path)
-        .arg("--remote-expr")
-        .arg(expression)
-        .output()
-        .map_err(|err| err.to_string())?;
+    let _ = rpc.request("nvim_eval", vec![Value::from(expression)])?;
 
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-
-    read_markdown(root.to_string_lossy().to_string(), relative)
+    read_current_neovim_markdown(app)?
+        .ok_or_else(|| format!("opened {relative}, but it is not an active Markdown buffer"))
 }
 
 fn read_markdown_path(root: &Path, file_path: &Path) -> Result<MarkdownFile, String> {
