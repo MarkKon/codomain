@@ -3,7 +3,8 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import katex from "katex";
-import { createMarkdownPreview, escapeHtml } from "./markdownPreview.js";
+import { escapeHtml } from "./markdownEscaping.js";
+import { createMarkdownPreview } from "./markdownPreview.js";
 import { createPreviewNavigationController } from "./previewNavigation.js";
 import {
   applyViewModeTransition,

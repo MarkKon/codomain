@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createMarkdownPreview, createMarkdownRenderer, escapeHtml } from "./markdownPreview.js";
+import { createMarkdownPreview } from "./markdownPreview.js";
+import { createMarkdownRendering } from "./markdownRendering.js";
+import { escapeHtml } from "./markdownEscaping.js";
 
 function renderMath(source, displayMode) {
   return displayMode ? `<math-block>${source}</math-block>` : `<math-inline>${source}</math-inline>`;
 }
 
-const renderMarkdown = createMarkdownRenderer(renderMath);
+const markdownRendering = createMarkdownRendering({ renderMath });
 
 test("renders block markdown without changing existing syntax", () => {
   assert.equal(
-    renderMarkdown("# Title\n\n- one\n- **two**\n\n```js\nconst value = 1 < 2;\n```"),
+    markdownRendering.render("# Title\n\n- one\n- **two**\n\n```js\nconst value = 1 < 2;\n```"),
     [
       "<h1>Title</h1>",
       "",
@@ -26,21 +28,21 @@ test("renders block markdown without changing existing syntax", () => {
 
 test("renders wikilinks with targets and labels", () => {
   assert.equal(
-    renderMarkdown("Open [[Nested/Deep Note|deep note]] and [[Home]]."),
+    markdownRendering.render("Open [[Nested/Deep Note|deep note]] and [[Home]]."),
     '<p>Open <a href="#" data-wikilink="Nested/Deep Note">deep note</a> and <a href="#" data-wikilink="Home">Home</a>.</p>',
   );
 });
 
 test("escapes markdown text and wikilink labels", () => {
   assert.equal(
-    renderMarkdown("<script>x</script> [[A&B|<Label>]]"),
+    markdownRendering.render("<script>x</script> [[A&B|<Label>]]"),
     '<p>&lt;script&gt;x&lt;/script&gt; <a href="#" data-wikilink="A&amp;B">&lt;Label&gt;</a></p>',
   );
 });
 
 test("delegates inline and block math rendering", () => {
   assert.equal(
-    renderMarkdown("Inline $x^2$.\n$$\ny = 1\n$$"),
+    markdownRendering.render("Inline $x^2$.\n$$\ny = 1\n$$"),
     "<p>Inline <math-inline>x^2</math-inline>.</p>\n<div class=\"math-block\"><math-block>y = 1</math-block></div>",
   );
 });
