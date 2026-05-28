@@ -172,6 +172,7 @@ vim.api.nvim_create_autocmd({{ "BufEnter", "BufWritePost", "TextChanged", "TextC
   group = group,
   callback = notify_codomain,
 }})
+vim.opt.mouse = "a"
 notify_codomain()
 "#
     );
@@ -296,7 +297,6 @@ fn write_to_neovim(app: tauri::AppHandle, data: String) -> Result<(), String> {
         .ok_or_else(|| "neovim has not been started".to_string())?;
     writer
         .write_all(data.as_bytes())
-        .and_then(|_| writer.flush())
         .map_err(|err| err.to_string())
 }
 

@@ -17,9 +17,6 @@ const state = {
   fit: null,
   resizeObserver: null,
   fitFrame: null,
-  pendingInput: "",
-  inputInFlight: false,
-  inputFlushTimer: null,
   previewRefreshTimer: null,
   previewRefreshInFlight: false,
 };
@@ -146,10 +143,18 @@ function setupTerminal() {
       brightWhite: "#f7f3ee",
     },
   });
+  state.terminal.attachCustomKeyEventHandler((event) => {
+    if (shouldForwardRepeatedPrintableKey(event)) {
+      event.preventDefault();
+      sendNeovimInput(event.key);
+      return false;
+    }
+    return true;
+  });
   state.fit = new FitAddon();
   state.terminal.loadAddon(state.fit);
   state.terminal.open(terminalHost);
-  state.terminal.onData(queueNeovimInput);
+  state.terminal.onData(sendNeovimInput);
   terminalPane.addEventListener("pointerdown", focusTerminal);
   terminalPane.addEventListener("click", focusTerminal);
   state.resizeObserver = new ResizeObserver(scheduleTerminalFit);
@@ -193,29 +198,21 @@ function focusTerminal() {
   state.terminal.focus();
 }
 
-function queueNeovimInput(data) {
-  state.pendingInput += data;
-  if (state.inputFlushTimer) return;
-  state.inputFlushTimer = setTimeout(flushNeovimInput, 0);
+function sendNeovimInput(data) {
+  invoke("write_to_neovim", { data }).catch((error) => {
+    state.terminal.writeln(`\r\n[codomain input error: ${String(error)}]`);
+  });
 }
 
-async function flushNeovimInput() {
-  state.inputFlushTimer = null;
-  if (state.inputInFlight || !state.pendingInput) return;
-
-  const data = state.pendingInput;
-  state.pendingInput = "";
-  state.inputInFlight = true;
-  try {
-    await invoke("write_to_neovim", { data });
-  } catch (error) {
-    state.terminal.writeln(`\r\n[codomain input error: ${String(error)}]`);
-  } finally {
-    state.inputInFlight = false;
-    if (state.pendingInput) {
-      state.inputFlushTimer = setTimeout(flushNeovimInput, 0);
-    }
-  }
+function shouldForwardRepeatedPrintableKey(event) {
+  return (
+    event.type === "keydown" &&
+    event.repeat &&
+    event.key.length === 1 &&
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey
+  );
 }
 
 async function loadMarkdown(path, tolerateMissing = false) {
