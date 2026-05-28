@@ -19,7 +19,6 @@ use tauri::{Emitter, Manager};
 struct NvimSession {
     root: PathBuf,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
     rpc: Arc<NvimRpc>,
     child: Box<dyn Child + Send + Sync>,
 }
@@ -27,6 +26,7 @@ struct NvimSession {
 #[derive(Default)]
 struct AppState {
     session: Mutex<Option<NvimSession>>,
+    input_writer: Mutex<Option<Box<dyn Write + Send>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -279,10 +279,10 @@ fn start_neovim(app: tauri::AppHandle, root: String, rows: u16, cols: u16) -> Re
     *session = Some(NvimSession {
         root,
         master: pair.master,
-        writer,
         rpc,
         child,
     });
+    *state.input_writer.lock().map_err(|err| err.to_string())? = Some(writer);
 
     Ok(())
 }
@@ -290,13 +290,13 @@ fn start_neovim(app: tauri::AppHandle, root: String, rows: u16, cols: u16) -> Re
 #[tauri::command]
 fn write_to_neovim(app: tauri::AppHandle, data: String) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let mut session = state.session.lock().map_err(|err| err.to_string())?;
-    let session = session
+    let mut writer = state.input_writer.lock().map_err(|err| err.to_string())?;
+    let writer = writer
         .as_mut()
         .ok_or_else(|| "neovim has not been started".to_string())?;
-    session
-        .writer
+    writer
         .write_all(data.as_bytes())
+        .and_then(|_| writer.flush())
         .map_err(|err| err.to_string())
 }
 
@@ -483,22 +483,19 @@ fn resolve_inside_root(root: &Path, relative: &str) -> Result<PathBuf, String> {
     }
 
     for component in path.components() {
-        if matches!(component, Component::ParentDir | Component::Prefix(_) | Component::RootDir) {
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
             return Err("path must stay inside the root folder".to_string());
         }
     }
 
     let resolved = root.join(path);
-    let canonical_parent = resolved
-        .parent()
-        .ok_or_else(|| "invalid file path".to_string())
-        .and_then(|parent| fs::canonicalize(parent).map_err(|err| err.to_string()))?;
+    let canonical = fs::canonicalize(&resolved).map_err(|err| err.to_string())?;
 
-    if !canonical_parent.starts_with(root) {
+    if !canonical.starts_with(root) {
         return Err("path escapes the root folder".to_string());
     }
 
-    Ok(resolved)
+    Ok(canonical)
 }
 
 impl Drop for NvimSession {

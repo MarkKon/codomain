@@ -17,6 +17,11 @@ const state = {
   fit: null,
   resizeObserver: null,
   fitFrame: null,
+  pendingInput: "",
+  inputInFlight: false,
+  inputFlushTimer: null,
+  previewRefreshTimer: null,
+  previewRefreshInFlight: false,
 };
 
 document.querySelector("#app").innerHTML = `
@@ -72,7 +77,7 @@ async function boot() {
   setupTerminal();
   await startTerminal();
   await loadMarkdown(state.currentPath, true);
-  await listen("nvim://buffer-changed", refreshFromNeovim);
+  await listen("nvim://buffer-changed", schedulePreviewRefresh);
   focusTerminal();
   window.setInterval(refreshFromNeovim, 1000);
 }
@@ -144,11 +149,7 @@ function setupTerminal() {
   state.fit = new FitAddon();
   state.terminal.loadAddon(state.fit);
   state.terminal.open(terminalHost);
-  state.terminal.onData((data) => {
-    invoke("write_to_neovim", { data }).catch((error) => {
-      state.terminal.writeln(`\r\n[codomain input error: ${String(error)}]`);
-    });
-  });
+  state.terminal.onData(queueNeovimInput);
   terminalPane.addEventListener("pointerdown", focusTerminal);
   terminalPane.addEventListener("click", focusTerminal);
   state.resizeObserver = new ResizeObserver(scheduleTerminalFit);
@@ -192,6 +193,31 @@ function focusTerminal() {
   state.terminal.focus();
 }
 
+function queueNeovimInput(data) {
+  state.pendingInput += data;
+  if (state.inputFlushTimer) return;
+  state.inputFlushTimer = setTimeout(flushNeovimInput, 0);
+}
+
+async function flushNeovimInput() {
+  state.inputFlushTimer = null;
+  if (state.inputInFlight || !state.pendingInput) return;
+
+  const data = state.pendingInput;
+  state.pendingInput = "";
+  state.inputInFlight = true;
+  try {
+    await invoke("write_to_neovim", { data });
+  } catch (error) {
+    state.terminal.writeln(`\r\n[codomain input error: ${String(error)}]`);
+  } finally {
+    state.inputInFlight = false;
+    if (state.pendingInput) {
+      state.inputFlushTimer = setTimeout(flushNeovimInput, 0);
+    }
+  }
+}
+
 async function loadMarkdown(path, tolerateMissing = false) {
   try {
     const file = await invoke("read_markdown", { root: state.root, path });
@@ -203,13 +229,25 @@ async function loadMarkdown(path, tolerateMissing = false) {
 }
 
 async function refreshFromNeovim() {
+  if (state.previewRefreshInFlight) return;
+  state.previewRefreshInFlight = true;
   try {
     const file = await invoke("read_current_neovim_markdown");
     if (!file || (file.path === state.currentPath && file.content === state.currentContent)) return;
     renderFile(file);
   } catch {
     // Neovim can briefly reject remote calls while starting or exiting.
+  } finally {
+    state.previewRefreshInFlight = false;
   }
+}
+
+function schedulePreviewRefresh() {
+  if (state.previewRefreshTimer) clearTimeout(state.previewRefreshTimer);
+  state.previewRefreshTimer = setTimeout(() => {
+    state.previewRefreshTimer = null;
+    refreshFromNeovim();
+  }, 80);
 }
 
 function bindPreviewLinks() {
