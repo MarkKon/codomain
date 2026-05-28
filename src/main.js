@@ -4,7 +4,11 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import katex from "katex";
 import { createMarkdownPreview, escapeHtml } from "./markdownPreview.js";
-import { applyViewModeTransition, resolveViewModeCommand } from "./viewModePolicy.js";
+import {
+  applyViewModeTransition,
+  resolveViewModeCommand,
+  shouldBlockImplicitTerminalFocus,
+} from "./viewModePolicy.js";
 import { VIEW_MODES } from "./viewModes.js";
 import "katex/dist/katex.min.css";
 import "@xterm/xterm/css/xterm.css";
@@ -191,7 +195,7 @@ function setMode(mode) {
     shell,
     modeButtons: document.querySelectorAll("[data-mode-target]"),
     scheduleTerminalFit,
-    requestTerminalFocus: focusTerminal,
+    requestTerminalFocus: () => focusTerminal({ explicit: false }),
   });
   if (!result.ok) return false;
   state.mode = result.mode;
@@ -203,12 +207,12 @@ function setupPreviewNavigation() {
   previewBackButton.addEventListener("click", async () => {
     if (!markdownPreview.canGoBack()) return;
     window.history.back();
-    focusTerminal();
+    focusTerminal({ explicit: true });
   });
   previewForwardButton.addEventListener("click", async () => {
     if (!markdownPreview.canGoForward()) return;
     window.history.forward();
-    focusTerminal();
+    focusTerminal({ explicit: true });
   });
   window.addEventListener("popstate", async (event) => {
     const generation = Number(event.state?.previewGeneration);
@@ -231,21 +235,21 @@ function setupPreviewNavigation() {
       syncPreviewNavButtons();
     } finally {
       state.handlingPopState = false;
-      focusTerminal();
+      focusTerminal({ explicit: true });
     }
   });
   window.addEventListener("mouseup", async (event) => {
     if (event.button === 3 && markdownPreview.canGoBack()) {
       window.history.back();
-      focusTerminal();
+      focusTerminal({ explicit: true });
     }
     if (event.button === 4 && markdownPreview.canGoForward()) {
       window.history.forward();
-      focusTerminal();
+      focusTerminal({ explicit: true });
     }
   });
-  markdownPane.addEventListener("pointerup", focusTerminal);
-  markdownPane.addEventListener("click", focusTerminal);
+  markdownPane.addEventListener("pointerup", () => focusTerminal({ explicit: true }));
+  markdownPane.addEventListener("click", () => focusTerminal({ explicit: true }));
   syncPreviewNavButtons();
 }
 
@@ -340,8 +344,8 @@ async function startTerminal() {
   scheduleTerminalFit();
 }
 
-function scheduleTerminalFit() {
-  if (!state.fit || state.mode === VIEW_MODES.MARKDOWN) return;
+function scheduleTerminalFit(nextMode = state.mode) {
+  if (!state.fit || nextMode === VIEW_MODES.MARKDOWN) return;
   if (state.fitFrame) cancelAnimationFrame(state.fitFrame);
   state.fitFrame = requestAnimationFrame(() => {
     state.fitFrame = null;
@@ -361,8 +365,9 @@ function fitTerminalNow() {
   }).catch(() => {});
 }
 
-function focusTerminal() {
-  if (!state.terminal || state.mode === VIEW_MODES.MARKDOWN) return;
+function focusTerminal({ explicit = false } = {}) {
+  if (!state.terminal) return;
+  if (!explicit && shouldBlockImplicitTerminalFocus(state.mode)) return;
   state.terminal.focus();
 }
 

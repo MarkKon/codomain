@@ -15,7 +15,7 @@ export function applyViewModeTransition({
   modeButtons.forEach((button) => {
     button.toggleAttribute("aria-pressed", button.dataset.modeTarget === nextMode);
   });
-  scheduleTerminalFit();
+  scheduleTerminalFit(nextMode);
 
   if (nextMode !== VIEW_MODES.MARKDOWN) {
     window.setTimeout(requestTerminalFocus, focusDelayMs);
@@ -27,6 +27,10 @@ export function applyViewModeTransition({
     shouldAllowTerminalFocusFromPreview: true,
     shouldFitTerminal: nextMode !== VIEW_MODES.MARKDOWN,
   };
+}
+
+export function shouldBlockImplicitTerminalFocus(mode) {
+  return parseViewMode(mode) === VIEW_MODES.MARKDOWN;
 }
 
 export function resolveViewModeCommand(input) {

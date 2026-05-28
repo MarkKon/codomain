@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyViewModeTransition, resolveViewModeCommand } from "./viewModePolicy.js";
+import {
+  applyViewModeTransition,
+  resolveViewModeCommand,
+  shouldBlockImplicitTerminalFocus,
+} from "./viewModePolicy.js";
 
 test("rejects unknown view mode command payloads", () => {
   assert.equal(resolveViewModeCommand("bogus"), null);
@@ -39,4 +43,27 @@ test("applies transition side effects for valid view mode", () => {
     ["nvim", "aria-pressed", false],
     ["split", "aria-pressed", true],
   ]);
+});
+
+test("requests terminal fit using next mode when leaving markdown", () => {
+  const shell = { dataset: {} };
+  let fitArg = null;
+
+  const result = applyViewModeTransition({
+    mode: "split",
+    shell,
+    modeButtons: [],
+    scheduleTerminalFit: (mode) => {
+      fitArg = mode;
+    },
+    requestTerminalFocus: () => {},
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(fitArg, "split");
+});
+
+test("markdown blocks implicit focus only, not explicit preview restoration", () => {
+  assert.equal(shouldBlockImplicitTerminalFocus("markdown"), true);
+  assert.equal(shouldBlockImplicitTerminalFocus("split"), false);
 });
