@@ -4,6 +4,8 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import katex from "katex";
 import { createMarkdownPreview, escapeHtml } from "./markdownPreview.js";
+import { applyViewModeTransition, resolveViewModeCommand } from "./viewModePolicy.js";
+import { VIEW_MODES } from "./viewModes.js";
 import "katex/dist/katex.min.css";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
@@ -13,7 +15,7 @@ const { listen } = window.__TAURI__.event;
 
 const state = {
   root: "",
-  mode: "split",
+  mode: VIEW_MODES.SPLIT,
   terminal: null,
   fit: null,
   unicode: null,
@@ -166,15 +168,15 @@ function setupModes() {
     }
     if (event.key === "1") {
       event.preventDefault();
-      setMode("nvim");
+      setMode(VIEW_MODES.NVIM);
     }
     if (event.key === "2") {
       event.preventDefault();
-      setMode("split");
+      setMode(VIEW_MODES.SPLIT);
     }
     if (event.key === "3") {
       event.preventDefault();
-      setMode("markdown");
+      setMode(VIEW_MODES.MARKDOWN);
     }
   });
 
@@ -182,15 +184,18 @@ function setupModes() {
 }
 
 function setMode(mode) {
-  state.mode = mode;
-  shell.dataset.mode = mode;
-  document.querySelectorAll("[data-mode-target]").forEach((button) => {
-    button.toggleAttribute("aria-pressed", button.dataset.modeTarget === mode);
+  const resolvedMode = resolveViewModeCommand(mode);
+  if (!resolvedMode) return false;
+  const result = applyViewModeTransition({
+    mode: resolvedMode,
+    shell,
+    modeButtons: document.querySelectorAll("[data-mode-target]"),
+    scheduleTerminalFit,
+    requestTerminalFocus: focusTerminal,
   });
-  scheduleTerminalFit();
-  window.setTimeout(() => {
-    if (mode !== "markdown") focusTerminal();
-  }, 50);
+  if (!result.ok) return false;
+  state.mode = result.mode;
+  return true;
 }
 
 function setupPreviewNavigation() {
@@ -336,7 +341,7 @@ async function startTerminal() {
 }
 
 function scheduleTerminalFit() {
-  if (!state.fit || state.mode === "markdown") return;
+  if (!state.fit || state.mode === VIEW_MODES.MARKDOWN) return;
   if (state.fitFrame) cancelAnimationFrame(state.fitFrame);
   state.fitFrame = requestAnimationFrame(() => {
     state.fitFrame = null;
@@ -347,7 +352,7 @@ function scheduleTerminalFit() {
 }
 
 function fitTerminalNow() {
-  if (!state.fit || state.mode === "markdown") return;
+  if (!state.fit || state.mode === VIEW_MODES.MARKDOWN) return;
   if (terminalHost.clientWidth === 0 || terminalHost.clientHeight === 0) return;
   state.fit.fit();
   invoke("resize_neovim", {
@@ -357,7 +362,7 @@ function fitTerminalNow() {
 }
 
 function focusTerminal() {
-  if (!state.terminal || state.mode === "markdown") return;
+  if (!state.terminal || state.mode === VIEW_MODES.MARKDOWN) return;
   state.terminal.focus();
 }
 
