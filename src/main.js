@@ -4,6 +4,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import katex from "katex";
 import { createMarkdownPreview, escapeHtml } from "./markdownPreview.js";
+import { createPreviewNavigationController } from "./previewNavigation.js";
 import {
   applyViewModeTransition,
   resolveViewModeCommand,
@@ -28,9 +29,6 @@ const state = {
   fitFrame: null,
   previewRefreshTimer: null,
   previewRefreshInFlight: false,
-  previewHistoryIndex: 0,
-  previewHistoryGeneration: 0,
-  handlingPopState: false,
 };
 
 document.querySelector("#app").innerHTML = `
@@ -94,9 +92,17 @@ const markdownPreview = createMarkdownPreview({
   openWikilink: ({ fromPath, target }) =>
     invoke("open_wikilink_in_neovim", { fromPath, target }),
   onPathTransition: (previousPath, nextPath) => {
-    recordPreviewHistory(previousPath, nextPath);
-    syncPreviewNavButtons();
+    previewNavigation.recordTransition(previousPath, nextPath);
+    previewNavigation.syncButtons();
   },
+});
+const previewNavigation = createPreviewNavigationController({
+  markdownPreview,
+  backButton: previewBackButton,
+  forwardButton: previewForwardButton,
+  markdownPane,
+  focusTerminal,
+  activateMarkdownFile,
 });
 
 boot().catch((error) => {
@@ -133,7 +139,7 @@ async function changeRoot(root) {
   state.root = root;
   rootLabel.textContent = root;
   markdownPreview.reset();
-  resetPreviewHistoryState();
+  previewNavigation.resetHistoryState();
   state.terminal.reset();
   fitTerminalNow();
   await invoke("start_neovim", {
@@ -203,59 +209,7 @@ function setMode(mode) {
 }
 
 function setupPreviewNavigation() {
-  resetPreviewHistoryState();
-  previewBackButton.addEventListener("click", async () => {
-    if (!markdownPreview.canGoBack()) return;
-    window.history.back();
-    focusTerminal({ explicit: true });
-  });
-  previewForwardButton.addEventListener("click", async () => {
-    if (!markdownPreview.canGoForward()) return;
-    window.history.forward();
-    focusTerminal({ explicit: true });
-  });
-  window.addEventListener("popstate", async (event) => {
-    const generation = Number(event.state?.previewGeneration);
-    const nextIndex = Number(event.state?.previewIndex);
-    if (
-      !Number.isFinite(generation) ||
-      generation !== state.previewHistoryGeneration ||
-      !Number.isFinite(nextIndex)
-    ) {
-      window.history.replaceState(currentPreviewHistoryState(), "", window.location.href);
-      return;
-    }
-    const direction = nextIndex - state.previewHistoryIndex;
-    state.handlingPopState = true;
-    try {
-      const file =
-        direction < 0 ? markdownPreview.goBack() : direction > 0 ? markdownPreview.goForward() : null;
-      if (file) await activateMarkdownFile(file.path);
-      state.previewHistoryIndex = nextIndex;
-      syncPreviewNavButtons();
-    } finally {
-      state.handlingPopState = false;
-      focusTerminal({ explicit: true });
-    }
-  });
-  window.addEventListener("mouseup", async (event) => {
-    if (event.button === 3 && markdownPreview.canGoBack()) {
-      window.history.back();
-      focusTerminal({ explicit: true });
-    }
-    if (event.button === 4 && markdownPreview.canGoForward()) {
-      window.history.forward();
-      focusTerminal({ explicit: true });
-    }
-  });
-  markdownPane.addEventListener("pointerup", () => focusTerminal({ explicit: true }));
-  markdownPane.addEventListener("click", () => focusTerminal({ explicit: true }));
-  syncPreviewNavButtons();
-}
-
-function syncPreviewNavButtons() {
-  previewBackButton.disabled = !markdownPreview.canGoBack();
-  previewForwardButton.disabled = !markdownPreview.canGoForward();
+  previewNavigation.setup();
 }
 
 function zoomIn() {
@@ -392,12 +346,12 @@ async function loadMarkdown(path, tolerateMissing = false) {
   try {
     const file = await invoke("read_markdown", { root: state.root, path });
     const previousPath = markdownPreview.currentPath();
-    if (markdownPreview.renderFile(file)) recordPreviewHistory(previousPath, file.path);
-    syncPreviewNavButtons();
+    if (markdownPreview.renderFile(file)) previewNavigation.recordTransition(previousPath, file.path);
+    previewNavigation.syncButtons();
   } catch (error) {
     if (!tolerateMissing) throw error;
     markdownPreview.showEmpty();
-    syncPreviewNavButtons();
+    previewNavigation.syncButtons();
   }
 }
 
@@ -409,36 +363,14 @@ async function refreshFromNeovim() {
     if (!file) return;
     const previousPath = markdownPreview.currentPath();
     if (markdownPreview.renderFile(file)) {
-      recordPreviewHistory(previousPath, file.path);
-      syncPreviewNavButtons();
+      previewNavigation.recordTransition(previousPath, file.path);
+      previewNavigation.syncButtons();
     }
   } catch {
     // Neovim can briefly reject remote calls while starting or exiting.
   } finally {
     state.previewRefreshInFlight = false;
   }
-}
-
-function recordPreviewHistory(previousPath, nextPath) {
-  if (!nextPath || previousPath === nextPath) return;
-  if (state.handlingPopState) return;
-  state.previewHistoryIndex += 1;
-  window.history.pushState(currentPreviewHistoryState(), "", window.location.href);
-}
-
-function resetPreviewHistoryState() {
-  state.previewHistoryGeneration += 1;
-  state.previewHistoryIndex = 0;
-  state.handlingPopState = false;
-  window.history.replaceState(currentPreviewHistoryState(), "", window.location.href);
-  syncPreviewNavButtons();
-}
-
-function currentPreviewHistoryState() {
-  return {
-    previewGeneration: state.previewHistoryGeneration,
-    previewIndex: state.previewHistoryIndex,
-  };
 }
 
 async function activateMarkdownFile(path) {
