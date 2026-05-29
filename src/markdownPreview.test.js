@@ -5,7 +5,7 @@ import { createMarkdownRendering } from "./markdownRendering.js";
 import { escapeHtml } from "./markdownEscaping.js";
 
 function renderMath(source, displayMode) {
-  return displayMode ? `<math-block>${source}</math-block>` : `<math-inline>${source}</math-inline>`;
+  return displayMode ? `<math-display>${source}</math-display>` : `<math-inline>${source}</math-inline>`;
 }
 
 const markdownRendering = createMarkdownRendering({ renderMath });
@@ -31,10 +31,10 @@ test("escapes markdown text and wikilink labels", () => {
   );
 });
 
-test("delegates inline and block math rendering", () => {
+test("renders inline and block math in preview rendering", () => {
   assert.equal(
-    markdownRendering.render("Inline $x^2$.\n$$\ny = 1\n$$"),
-    "<p>Inline <math-inline>x^2</math-inline>.</p>\n<div class=\"math-block\"><math-block>y = 1</math-block></div>",
+    markdownRendering.render("Inline $x^2$.\n\n$$\ny = 1\n$$"),
+    "<p>Inline <math-inline>x^2</math-inline>.</p>\n<math-display>y = 1</math-display>",
   );
 });
 
