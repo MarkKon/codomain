@@ -91,8 +91,8 @@ const markdownPreview = createMarkdownPreview({
   renderMath,
   openWikilink: ({ fromPath, target }) =>
     invoke("open_wikilink_in_neovim", { fromPath, target }),
-  onPathTransition: (previousPath, nextPath) => {
-    previewNavigation.recordTransition(previousPath, nextPath);
+  onPathTransition: (previousPath, nextPath, details) => {
+    previewNavigation.recordTransition(previousPath, nextPath, details);
     previewNavigation.syncButtons();
   },
 });
@@ -107,8 +107,8 @@ const previewNavigation = createPreviewNavigationController({
 const previewRefresh = createPreviewRefreshController({
   readActiveMarkdownFile: () => invoke("read_current_neovim_markdown"),
   markdownPreview,
-  onPathTransition: (previousPath, nextPath) =>
-    previewNavigation.recordTransition(previousPath, nextPath),
+  onPathTransition: (previousPath, nextPath, details) =>
+    previewNavigation.recordTransition(previousPath, nextPath, details),
   onRenderedPathChange: () => previewNavigation.syncButtons(),
   setTimeoutFn: window.setTimeout.bind(window),
   clearTimeoutFn: window.clearTimeout.bind(window),

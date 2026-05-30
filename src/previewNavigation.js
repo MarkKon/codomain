@@ -10,6 +10,9 @@ export function createPreviewNavigationController({
   addWindowListener = (type, handler) => window.addEventListener(type, handler),
 }) {
   const state = {
+    displayedFile: null,
+    backStack: [],
+    forwardStack: [],
     previewHistoryIndex: 0,
     previewHistoryGeneration: 0,
     handlingPopState: false,
@@ -23,18 +26,67 @@ export function createPreviewNavigationController({
   }
 
   function syncButtons() {
-    backButton.disabled = !markdownPreview.canGoBack();
-    forwardButton.disabled = !markdownPreview.canGoForward();
+    backButton.disabled = state.backStack.length === 0;
+    forwardButton.disabled = state.forwardStack.length === 0;
   }
 
-  function recordTransition(previousPath, nextPath) {
-    if (!nextPath || previousPath === nextPath) return;
+  function toFileSnapshot(file) {
+    if (!file || typeof file.path !== "string" || typeof file.content !== "string") return null;
+    return { path: file.path, content: file.content };
+  }
+
+  function navigateBackInPreview() {
+    if (state.backStack.length === 0) return null;
+    if (state.displayedFile) state.forwardStack.push(state.displayedFile);
+    const next = state.backStack.pop();
+    state.displayedFile = next;
+    markdownPreview.renderFile(next, { scrollToTop: true });
+    return next;
+  }
+
+  function navigateForwardInPreview() {
+    if (state.forwardStack.length === 0) return null;
+    if (state.displayedFile) state.backStack.push(state.displayedFile);
+    const next = state.forwardStack.pop();
+    state.displayedFile = next;
+    markdownPreview.renderFile(next, { scrollToTop: true });
+    return next;
+  }
+
+  function recordTransition(previousPath, nextPath, details = {}) {
+    const previousFile =
+      toFileSnapshot(details.previousFile) ??
+      toFileSnapshot(typeof previousPath === "object" ? previousPath : null);
+    const nextFile =
+      toFileSnapshot(details.nextFile) ??
+      toFileSnapshot(typeof nextPath === "object" ? nextPath : null);
+    const previousTransitionPath = previousFile?.path ?? (typeof previousPath === "string" ? previousPath : null);
+    const nextTransitionPath = nextFile?.path ?? (typeof nextPath === "string" ? nextPath : null);
+    if (!nextTransitionPath) return;
     if (state.handlingPopState) return;
+
+    if (nextFile && (!state.displayedFile || state.displayedFile.path === nextTransitionPath)) {
+      state.displayedFile = nextFile;
+    }
+    if (previousTransitionPath === nextTransitionPath) return;
+
+    if (previousFile && (!state.displayedFile || state.displayedFile.path !== previousFile.path)) {
+      state.displayedFile = previousFile;
+    }
+    if (state.displayedFile && state.displayedFile.path !== nextTransitionPath) {
+      state.backStack.push(state.displayedFile);
+      state.forwardStack = [];
+    }
+    if (nextFile) state.displayedFile = nextFile;
     state.previewHistoryIndex += 1;
     historyApi.pushState(currentPreviewHistoryState(), "", locationHref());
+    syncButtons();
   }
 
   function resetHistoryState() {
+    state.displayedFile = null;
+    state.backStack = [];
+    state.forwardStack = [];
     state.previewHistoryGeneration += 1;
     state.previewHistoryIndex = 0;
     state.handlingPopState = false;
@@ -56,8 +108,7 @@ export function createPreviewNavigationController({
     const direction = nextIndex - state.previewHistoryIndex;
     state.handlingPopState = true;
     try {
-      const file =
-        direction < 0 ? markdownPreview.goBack() : direction > 0 ? markdownPreview.goForward() : null;
+      const file = direction < 0 ? navigateBackInPreview() : direction > 0 ? navigateForwardInPreview() : null;
       if (file) await activateMarkdownFile(file.path);
       state.previewHistoryIndex = nextIndex;
       syncButtons();
@@ -70,22 +121,22 @@ export function createPreviewNavigationController({
   function setup() {
     resetHistoryState();
     backButton.addEventListener("click", () => {
-      if (!markdownPreview.canGoBack()) return;
+      if (state.backStack.length === 0) return;
       historyApi.back();
       focusTerminal({ explicit: true });
     });
     forwardButton.addEventListener("click", () => {
-      if (!markdownPreview.canGoForward()) return;
+      if (state.forwardStack.length === 0) return;
       historyApi.forward();
       focusTerminal({ explicit: true });
     });
     addWindowListener("popstate", onPopState);
     addWindowListener("mouseup", (event) => {
-      if (event.button === 3 && markdownPreview.canGoBack()) {
+      if (event.button === 3 && state.backStack.length > 0) {
         historyApi.back();
         focusTerminal({ explicit: true });
       }
-      if (event.button === 4 && markdownPreview.canGoForward()) {
+      if (event.button === 4 && state.forwardStack.length > 0) {
         historyApi.forward();
         focusTerminal({ explicit: true });
       }

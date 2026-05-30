@@ -12,9 +12,10 @@ export function createPreviewRefreshController({
 
   function applyPreviewFile(file) {
     if (!file) return false;
+    const previousFile = markdownPreview.currentFile ? markdownPreview.currentFile() : null;
     const previousPath = markdownPreview.currentPath();
     if (!markdownPreview.renderFile(file)) return false;
-    onPathTransition?.(previousPath, file.path);
+    onPathTransition?.(previousPath, file.path, { previousFile, nextFile: file });
     onRenderedPathChange?.();
     return true;
   }

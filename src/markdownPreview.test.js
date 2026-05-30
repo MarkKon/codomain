@@ -42,55 +42,7 @@ test("escapes standalone html values", () => {
   assert.equal(escapeHtml(`<&>"'`), "&lt;&amp;&gt;&quot;&#039;");
 });
 
-test("tracks markdown preview history for back and forward navigation", () => {
-  const host = { innerHTML: "", scrollTop: 0, querySelectorAll: () => [], prepend() {} };
-  const preview = createMarkdownPreview({
-    host,
-    renderMath,
-    openWikilink: async () => {
-      throw new Error("unused");
-    },
-  });
-  const one = { path: "Home.md", content: "# Home" };
-  const two = { path: "Daily Log.md", content: "# Daily Log" };
-  const three = { path: "TODO.md", content: "# TODO" };
-
-  assert.equal(preview.renderFile(one), true);
-  assert.equal(preview.renderFile(two), true);
-  assert.equal(preview.renderFile(three), true);
-  assert.equal(preview.canGoBack(), true);
-  assert.equal(preview.canGoForward(), false);
-
-  assert.equal(preview.goBack().path, "Daily Log.md");
-  assert.equal(preview.goBack().path, "Home.md");
-  assert.equal(preview.canGoBack(), false);
-  assert.equal(preview.canGoForward(), true);
-
-  assert.equal(preview.goForward().path, "Daily Log.md");
-  assert.equal(preview.goForward().path, "TODO.md");
-  assert.equal(preview.canGoForward(), false);
-});
-
-test("returns activation target when navigating preview history", () => {
-  const host = { innerHTML: "", scrollTop: 0, querySelectorAll: () => [], prepend() {} };
-  const preview = createMarkdownPreview({
-    host,
-    renderMath,
-    openWikilink: async () => {
-      throw new Error("unused");
-    },
-  });
-  const one = { path: "Home.md", content: "# Home" };
-  const two = { path: "Daily Log.md", content: "# Daily Log" };
-
-  preview.renderFile(one);
-  preview.renderFile(two);
-  const previous = preview.goBack();
-  assert.equal(previous.path, "Home.md");
-  assert.equal(host.innerHTML.includes("<h1>Home</h1>"), true);
-});
-
-test("reset clears preview navigation history", () => {
+test("reset clears displayed markdown file", () => {
   const host = { innerHTML: "", scrollTop: 0, querySelectorAll: () => [], prepend() {} };
   const preview = createMarkdownPreview({
     host,
@@ -101,11 +53,9 @@ test("reset clears preview navigation history", () => {
   });
 
   preview.renderFile({ path: "Home.md", content: "# Home" });
-  preview.renderFile({ path: "TODO.md", content: "# TODO" });
-  assert.equal(preview.canGoBack(), true);
   preview.reset();
-  assert.equal(preview.canGoBack(), false);
-  assert.equal(preview.canGoForward(), false);
+  assert.equal(preview.currentPath(), null);
+  assert.equal(host.innerHTML, "");
 });
 
 test("exposes current markdown path for transition checks", () => {
