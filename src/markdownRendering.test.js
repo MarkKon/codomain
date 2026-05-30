@@ -216,6 +216,18 @@ test("renders obsidian image embeds as images", () => {
   assert.equal(html.includes("data-wikilink"), false);
 });
 
+test("treats image embeds with label separators as literal text", () => {
+  const rendering = createMarkdownRendering({ renderMath });
+  const html = rendering.render("![[Pasted image.png|thumb]]");
+  assert.equal(html, "<p>![[Pasted image.png|thumb]]</p>");
+});
+
+test("parses image embeds and wikilinks in the same paragraph", () => {
+  const rendering = createMarkdownRendering({ renderMath });
+  const html = rendering.render("See ![[Pasted image.png]] and [[Home|Start]].");
+  assert.match(html, /See <img src="Pasted image\.png" alt="Pasted image\.png"> and <a href="#" data-wikilink="Home">Start<\/a>\./);
+});
+
 test("does not parse obsidian image embeds inside code spans or fences", () => {
   const rendering = createMarkdownRendering({ renderMath });
   const html = rendering.render("`![[Pasted image 20260507134701.png]]`\n\n```md\n![[Pasted image 20260507134701.png]]\n```");
