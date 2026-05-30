@@ -10,12 +10,7 @@ import { createMarkdownPreview } from "./markdownPreview.js";
 import { createPreviewNavigationController } from "./previewNavigation.js";
 import { createPreviewRefreshController, wirePreviewRefresh } from "./previewRefresh.js";
 import { createTerminalRuntime } from "./terminalRuntime.js";
-import { createViewModeRuntime } from "./viewModeRuntime.js";
-import {
-  applyViewModeTransition,
-  resolveViewModeCommand,
-  shouldBlockImplicitTerminalFocus,
-} from "./viewModePolicy.js";
+import { createViewModeRuntime, shouldBlockImplicitTerminalFocus } from "./viewModeRuntime.js";
 import { VIEW_MODES } from "./viewModes.js";
 import "katex/dist/katex.min.css";
 import "@xterm/xterm/css/xterm.css";
@@ -165,16 +160,8 @@ const terminalRuntime = createTerminalRuntime({
 });
 const viewModeRuntime = createViewModeRuntime({
   initialMode: VIEW_MODES.SPLIT,
+  shell,
   getModeButtons: () => modeButtons,
-  resolveViewModeCommand,
-  applyViewModeTransition: ({ mode, modeButtons: nextModeButtons, scheduleTerminalFit, requestTerminalFocus }) =>
-    applyViewModeTransition({
-      mode,
-      shell,
-      modeButtons: nextModeButtons,
-      scheduleTerminalFit,
-      requestTerminalFocus,
-    }),
   scheduleTerminalFit: (mode) => terminalRuntime.scheduleTerminalFit(mode),
   requestTerminalFocus: () => terminalRuntime.focusTerminal({ explicit: false }),
   zoomIn: () => invoke("zoom_in").catch(() => {}),
