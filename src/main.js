@@ -6,6 +6,7 @@ import katex from "katex";
 import { escapeHtml } from "./markdownEscaping.js";
 import { createMarkdownPreview } from "./markdownPreview.js";
 import { createPreviewNavigationController } from "./previewNavigation.js";
+import { createPreviewRefreshController, wirePreviewRefresh } from "./previewRefresh.js";
 import {
   applyViewModeTransition,
   resolveViewModeCommand,
@@ -28,8 +29,6 @@ const state = {
   webgl: null,
   resizeObserver: null,
   fitFrame: null,
-  previewRefreshTimer: null,
-  previewRefreshInFlight: false,
 };
 
 document.querySelector("#app").innerHTML = `
@@ -105,6 +104,15 @@ const previewNavigation = createPreviewNavigationController({
   focusTerminal,
   activateMarkdownFile,
 });
+const previewRefresh = createPreviewRefreshController({
+  readActiveMarkdownFile: () => invoke("read_current_neovim_markdown"),
+  markdownPreview,
+  onPathTransition: (previousPath, nextPath) =>
+    previewNavigation.recordTransition(previousPath, nextPath),
+  onRenderedPathChange: () => previewNavigation.syncButtons(),
+  setTimeoutFn: window.setTimeout.bind(window),
+  clearTimeoutFn: window.clearTimeout.bind(window),
+});
 
 boot().catch((error) => {
   preview.innerHTML = `<div class="empty-state"><h1>Codomain could not start</h1><p>${escapeHtml(String(error))}</p></div>`;
@@ -119,10 +127,13 @@ async function boot() {
   setupTerminal();
   await startTerminal();
   await loadMarkdown("README.md", true);
-  await listen("nvim://buffer-changed", schedulePreviewRefresh);
+  await wirePreviewRefresh({
+    listenToEvent: listen,
+    setIntervalFn: window.setInterval.bind(window),
+    previewRefresh,
+  });
   await listen("codomain://set-mode", (event) => setMode(event.payload));
   focusTerminal();
-  window.setInterval(refreshFromNeovim, 1000);
 }
 
 async function chooseRootFolder() {
@@ -346,9 +357,7 @@ function shouldForwardRepeatedPrintableKey(event) {
 async function loadMarkdown(path, tolerateMissing = false) {
   try {
     const file = await invoke("read_markdown", { root: state.root, path });
-    const previousPath = markdownPreview.currentPath();
-    if (markdownPreview.renderFile(file)) previewNavigation.recordTransition(previousPath, file.path);
-    previewNavigation.syncButtons();
+    previewRefresh.applyPreviewFile(file);
   } catch (error) {
     if (!tolerateMissing) throw error;
     markdownPreview.showEmpty();
@@ -356,34 +365,8 @@ async function loadMarkdown(path, tolerateMissing = false) {
   }
 }
 
-async function refreshFromNeovim() {
-  if (state.previewRefreshInFlight) return;
-  state.previewRefreshInFlight = true;
-  try {
-    const file = await invoke("read_current_neovim_markdown");
-    if (!file) return;
-    const previousPath = markdownPreview.currentPath();
-    if (markdownPreview.renderFile(file)) {
-      previewNavigation.recordTransition(previousPath, file.path);
-      previewNavigation.syncButtons();
-    }
-  } catch {
-    // Neovim can briefly reject remote calls while starting or exiting.
-  } finally {
-    state.previewRefreshInFlight = false;
-  }
-}
-
 async function activateMarkdownFile(path) {
   await invoke("open_markdown_in_neovim", { path });
-}
-
-function schedulePreviewRefresh() {
-  if (state.previewRefreshTimer) clearTimeout(state.previewRefreshTimer);
-  state.previewRefreshTimer = setTimeout(() => {
-    state.previewRefreshTimer = null;
-    refreshFromNeovim();
-  }, 80);
 }
 
 function renderMath(source, displayMode) {
