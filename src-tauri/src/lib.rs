@@ -1,12 +1,14 @@
+mod root_folder_markdown_files;
+
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use rmpv::{decode::read_value, encode::write_value, Value};
-use serde::Serialize;
+use root_folder_markdown_files::{MarkdownFile, RootFolderMarkdownFiles};
 use std::{
     collections::HashMap,
     fs,
     io::{BufReader, Read, Write},
     os::unix::net::UnixStream,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -54,127 +56,6 @@ impl Default for AppState {
             neovim: NeovimSessions::default(),
             zoom: Mutex::new(1.0),
         }
-    }
-}
-
-#[derive(Debug, Serialize, Clone)]
-struct MarkdownFile {
-    path: String,
-    content: String,
-}
-
-struct RootFolderMarkdownFiles {
-    root: PathBuf,
-}
-
-impl RootFolderMarkdownFiles {
-    fn new(root: impl AsRef<Path>) -> Result<Self, String> {
-        let root = fs::canonicalize(root).map_err(|err| err.to_string())?;
-        Ok(Self { root })
-    }
-
-    fn from_canonical(root: PathBuf) -> Self {
-        Self { root }
-    }
-
-    fn root(&self) -> &Path {
-        &self.root
-    }
-
-    fn read(&self, relative: &str) -> Result<MarkdownFile, String> {
-        let file_path = self.resolve_inside_root(relative)?;
-        self.read_canonical(&file_path)
-    }
-
-    fn read_canonical(&self, file_path: &Path) -> Result<MarkdownFile, String> {
-        if !file_path.starts_with(&self.root) {
-            return Err("path escapes the root folder".to_string());
-        }
-
-        let content = fs::read_to_string(file_path).map_err(|err| err.to_string())?;
-        let relative = self.relative_path(file_path)?;
-
-        Ok(MarkdownFile {
-            path: relative,
-            content,
-        })
-    }
-
-    fn resolve_wikilink(&self, from_path: &str, target: &str) -> Result<MarkdownFile, String> {
-        let file_path = self.resolve_wikilink_path(from_path, target)?;
-        self.read_canonical(&file_path)
-    }
-
-    fn resolve_wikilink_path(&self, from_path: &str, target: &str) -> Result<PathBuf, String> {
-        let target = normalize_wikilink_target(target)?;
-
-        let candidate = if target.starts_with('/') {
-            target.trim_start_matches('/').to_string()
-        } else if target.contains('/') {
-            let from_dir = Path::new(from_path)
-                .parent()
-                .unwrap_or_else(|| Path::new(""));
-            from_dir.join(target).to_string_lossy().to_string()
-        } else {
-            self.find_markdown_file_by_stem(target)?
-        };
-
-        let path = if candidate.ends_with(".md") {
-            candidate
-        } else {
-            format!("{candidate}.md")
-        };
-
-        self.resolve_inside_root(&path)
-    }
-
-    fn find_markdown_file_by_stem(&self, stem: &str) -> Result<String, String> {
-        let mut stack = vec![self.root.clone()];
-
-        while let Some(dir) = stack.pop() {
-            for entry in fs::read_dir(&dir).map_err(|err| err.to_string())? {
-                let entry = entry.map_err(|err| err.to_string())?;
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().and_then(|ext| ext.to_str()) == Some("md")
-                    && path.file_stem().and_then(|name| name.to_str()) == Some(stem)
-                {
-                    return self.relative_path(&path);
-                }
-            }
-        }
-
-        Err(format!("could not resolve [[{stem}]] under root"))
-    }
-
-    fn resolve_inside_root(&self, relative: &str) -> Result<PathBuf, String> {
-        let path = Path::new(relative);
-        if path.is_absolute() {
-            return Err("absolute paths are not allowed".to_string());
-        }
-
-        for component in path.components() {
-            if matches!(component, Component::Prefix(_) | Component::RootDir) {
-                return Err("path must stay inside the root folder".to_string());
-            }
-        }
-
-        let resolved = self.root.join(path);
-        let canonical = fs::canonicalize(&resolved).map_err(|err| err.to_string())?;
-
-        if !canonical.starts_with(&self.root) {
-            return Err("path escapes the root folder".to_string());
-        }
-
-        Ok(canonical)
-    }
-
-    fn relative_path(&self, file_path: &Path) -> Result<String, String> {
-        file_path
-            .strip_prefix(&self.root)
-            .map_err(|err| err.to_string())
-            .map(|path| path.to_string_lossy().to_string())
     }
 }
 
@@ -737,16 +618,6 @@ fn reset_zoom(app: tauri::AppHandle) {
     reset_app_zoom(&app);
 }
 
-fn normalize_wikilink_target(target: &str) -> Result<&str, String> {
-    let target = target.split('|').next().unwrap_or("");
-    let target = target.split('#').next().unwrap_or("").trim();
-    if target.is_empty() {
-        return Err("empty link target".to_string());
-    }
-
-    Ok(target)
-}
-
 fn vim_single_quote_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "''")
 }
@@ -961,84 +832,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
-    }
-
-    #[test]
-    fn root_folder_markdown_files_read_nested_markdown_file() {
-        let root = TempRoot::new();
-        root.write_file("folder/Note.md", "# Nested");
-        let markdown_files =
-            RootFolderMarkdownFiles::new(root.path()).expect("root folder should resolve");
-
-        let file = markdown_files
-            .read("folder/Note.md")
-            .expect("markdown file should be read");
-
-        assert_eq!(file.path, "folder/Note.md");
-        assert_eq!(file.content, "# Nested");
-    }
-
-    #[test]
-    fn root_folder_markdown_files_resolve_stem_wikilink_with_label_and_anchor() {
-        let root = TempRoot::new();
-        root.write_file("Daily.md", "daily body");
-        root.write_file("Folder/Source.md", "source");
-        let markdown_files =
-            RootFolderMarkdownFiles::new(root.path()).expect("root folder should resolve");
-
-        let file = markdown_files
-            .resolve_wikilink("Folder/Source.md", "Daily#Today|Read this")
-            .expect("wikilink should resolve by stem");
-
-        assert_eq!(file.path, "Daily.md");
-        assert_eq!(file.content, "daily body");
-    }
-
-    #[test]
-    fn root_folder_markdown_files_resolve_nested_wikilink_relative_to_source_file() {
-        let root = TempRoot::new();
-        root.write_file("Folder/Source.md", "source");
-        root.write_file("Folder/Sub/Target.md", "target");
-        let markdown_files =
-            RootFolderMarkdownFiles::new(root.path()).expect("root folder should resolve");
-
-        let file = markdown_files
-            .resolve_wikilink("Folder/Source.md", "Sub/Target")
-            .expect("nested wikilink should resolve relative to source file");
-
-        assert_eq!(file.path, "Folder/Sub/Target.md");
-        assert_eq!(file.content, "target");
-    }
-
-    #[test]
-    fn root_folder_markdown_files_reject_absolute_markdown_paths() {
-        let root = TempRoot::new();
-        let markdown_files =
-            RootFolderMarkdownFiles::new(root.path()).expect("root folder should resolve");
-
-        let error = markdown_files
-            .read("/etc/passwd")
-            .expect_err("absolute paths should be rejected");
-
-        assert_eq!(error, "absolute paths are not allowed");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn root_folder_markdown_files_reject_symlink_escape() {
-        let root = TempRoot::new();
-        let outside = TempRoot::new();
-        outside.write_file("Secret.md", "secret");
-        std::os::unix::fs::symlink(outside.path(), root.path().join("Outside"))
-            .expect("test symlink should be created");
-        let markdown_files =
-            RootFolderMarkdownFiles::new(root.path()).expect("root folder should resolve");
-
-        let error = markdown_files
-            .read("Outside/Secret.md")
-            .expect_err("symlink escapes should be rejected");
-
-        assert_eq!(error, "path escapes the root folder");
     }
 
     #[test]
