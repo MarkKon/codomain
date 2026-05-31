@@ -14,7 +14,7 @@ The DMG is written to:
 src-tauri/target/release/bundle/dmg/
 ```
 
-## GitHub Release
+## GitHub Release And Homebrew
 
 1. Update the version in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`.
 2. Commit the version bump.
@@ -25,7 +25,9 @@ src-tauri/target/release/bundle/dmg/
    git push origin v0.1.0
    ```
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, builds the macOS DMG, and attaches it to a GitHub Release.
+Pushing a `v*` tag runs `.github/workflows/release.yml`, builds a universal macOS DMG, attaches it to a GitHub Release, and updates the Homebrew cask in `MarkKon/homebrew-codomain`.
+
+See `docs/release/homebrew.md` for Homebrew setup and release operations.
 
 ## Neovim
 

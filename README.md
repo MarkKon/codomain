@@ -31,8 +31,9 @@ src-tauri/target/release/codomain .
 
 ## Release
 
-Pushing a `v*` tag builds and publishes an unsigned macOS DMG through GitHub Actions.
-See `docs/release/dmg.md` for the release checklist.
+Pushing a `v*` tag builds and publishes an unsigned universal macOS DMG through GitHub Actions.
+The same workflow updates the Homebrew cask in `MarkKon/homebrew-codomain`.
+See `docs/release/dmg.md` and `docs/release/homebrew.md` for the release checklist.
 
 ## Controls
 

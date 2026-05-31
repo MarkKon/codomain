@@ -8,9 +8,12 @@ on:
 permissions:
   contents: write
 
+env:
+  TAP_REPOSITORY: MarkKon/homebrew-codomain
+
 jobs:
   macos-dmg:
-    name: Build macOS DMG
+    name: Build and publish macOS DMG
     runs-on: macos-latest
 
     steps:
@@ -28,15 +31,94 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Build app and DMG
-        run: npm run tauri:build
+        run: npm run tauri:build -- --target universal-apple-darwin
+
+      - name: Prepare release asset
+        id: asset
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          dmg_path="$(find src-tauri/target -path '*/release/bundle/dmg/*.dmg' -type f | head -n 1)"
+          if [[ -z "${dmg_path}" ]]; then
+            echo "No DMG found under src-tauri/target" >&2
+            exit 1
+          fi
+
+          mkdir -p release-assets
+          asset_name="Codomain_${version}_universal.dmg"
+          asset_path="release-assets/${asset_name}"
+          cp "${dmg_path}" "${asset_path}"
+
+          sha256="$(shasum -a 256 "${asset_path}" | awk '{print $1}')"
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "asset_name=${asset_name}" >> "${GITHUB_OUTPUT}"
+          echo "asset_path=${asset_path}" >> "${GITHUB_OUTPUT}"
+          echo "sha256=${sha256}" >> "${GITHUB_OUTPUT}"
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            src-tauri/target/release/bundle/dmg/*.dmg \
+            "${{ steps.asset.outputs.asset_path }}" \
             --title "Codomain ${GITHUB_REF_NAME}" \
-            --notes "Unsigned macOS DMG build for ${GITHUB_REF_NAME}."
+            --notes "Unsigned universal macOS DMG build for ${GITHUB_REF_NAME}."
+
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPOSITORY }}
+          path: homebrew-codomain
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+
+      - name: Update Homebrew cask
+        env:
+          VERSION: ${{ steps.asset.outputs.version }}
+          SHA256: ${{ steps.asset.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p homebrew-codomain/Casks
+          cat > homebrew-codomain/Casks/codomain.rb <<RUBY
+          cask "codomain" do
+            version "${VERSION}"
+            sha256 "${SHA256}"
+
+            url "https://github.com/MarkKon/codomain/releases/download/v#{version}/Codomain_#{version}_universal.dmg",
+                verified: "github.com/MarkKon/codomain/"
+            name "Codomain"
+            desc "Root-bound Neovim and Markdown preview workspace"
+            homepage "https://github.com/MarkKon/codomain"
+
+            livecheck do
+              url :url
+              strategy :github_latest
+            end
+
+            app "Codomain.app"
+
+            zap trash: [
+              "~/Library/Application Support/dev.codomain.desktop",
+              "~/Library/Caches/dev.codomain.desktop",
+              "~/Library/Preferences/dev.codomain.desktop.plist",
+              "~/Library/WebKit/dev.codomain.desktop",
+            ]
+          end
+          RUBY
+
+          cd homebrew-codomain
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/codomain.rb
+          if git diff --cached --quiet; then
+            echo "Homebrew cask is already up to date."
+            exit 0
+          fi
+          git commit -m "Update Codomain to ${VERSION}"
+          git push
