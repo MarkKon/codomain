@@ -16,10 +16,11 @@ Build the macOS app bundle:
 PATH="/Users/kmark/.cargo/bin:$PATH" npm run tauri:build
 ```
 
-The release build writes:
+The release build writes the app bundle and DMG:
 
 ```text
 src-tauri/target/release/bundle/macos/Codomain.app
+src-tauri/target/release/bundle/dmg/
 ```
 
 You can also run the built binary directly from any folder:
@@ -27,6 +28,11 @@ You can also run the built binary directly from any folder:
 ```sh
 src-tauri/target/release/codomain .
 ```
+
+## Release
+
+Pushing a `v*` tag builds and publishes an unsigned macOS DMG through GitHub Actions.
+See `docs/release/dmg.md` for the release checklist.
 
 ## Controls
 

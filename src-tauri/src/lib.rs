@@ -97,7 +97,8 @@ impl NeovimSessions {
             std::env::temp_dir().join(format!("codomain-nvim-{}.sock", std::process::id()));
         let _ = fs::remove_file(&listen_path);
 
-        let mut command = CommandBuilder::new("nvim");
+        let nvim_command = resolve_neovim_command();
+        let mut command = CommandBuilder::new(nvim_command.as_os_str());
         command.arg("--cmd");
         command.arg("set termguicolors");
         command.arg("--listen");
@@ -109,7 +110,12 @@ impl NeovimSessions {
         let child = pair
             .slave
             .spawn_command(command)
-            .map_err(|err| format!("failed to start nvim: {err}"))?;
+            .map_err(|err| {
+                format!(
+                    "failed to start Neovim at {}: {err}. Make sure Neovim is installed and available at a standard path, or set CODOMAIN_NVIM.",
+                    nvim_command.to_string_lossy()
+                )
+            })?;
 
         let mut reader = BufReader::new(
             pair.master
@@ -549,6 +555,28 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
+fn resolve_neovim_command() -> PathBuf {
+    let configured = std::env::var_os("CODOMAIN_NVIM").map(PathBuf::from);
+    let candidates = [
+        PathBuf::from("/opt/homebrew/bin/nvim"),
+        PathBuf::from("/usr/local/bin/nvim"),
+        PathBuf::from("/usr/bin/nvim"),
+    ];
+    resolve_neovim_command_from(configured, &candidates)
+}
+
+fn resolve_neovim_command_from(configured: Option<PathBuf>, candidates: &[PathBuf]) -> PathBuf {
+    if let Some(command) = configured.filter(|path| !path.as_os_str().is_empty()) {
+        return command;
+    }
+
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("nvim"))
+}
+
 #[tauri::command]
 fn initialize_root() -> Result<String, String> {
     let cwd = std::env::current_dir().map_err(|err| err.to_string())?;
@@ -985,6 +1013,35 @@ mod tests {
             .expect_err("write should fail without a Neovim session");
 
         assert_eq!(error, "neovim has not been started");
+    }
+
+    #[test]
+    fn resolve_neovim_command_prefers_explicit_environment_path() {
+        let command = resolve_neovim_command_from(
+            Some(PathBuf::from("/custom/bin/nvim")),
+            &[PathBuf::from("/opt/homebrew/bin/nvim")],
+        );
+
+        assert_eq!(command, PathBuf::from("/custom/bin/nvim"));
+    }
+
+    #[test]
+    fn resolve_neovim_command_uses_existing_homebrew_candidate() {
+        let root = TempRoot::new();
+        let nvim = root.path().join("nvim");
+        fs::write(&nvim, "").expect("fake nvim should be written");
+
+        let command =
+            resolve_neovim_command_from(None, &[root.path().join("missing"), nvim.clone()]);
+
+        assert_eq!(command, nvim);
+    }
+
+    #[test]
+    fn resolve_neovim_command_falls_back_to_path_lookup() {
+        let command = resolve_neovim_command_from(None, &[PathBuf::from("/missing/nvim")]);
+
+        assert_eq!(command, PathBuf::from("nvim"));
     }
 
     #[test]
