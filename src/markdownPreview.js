@@ -99,7 +99,7 @@ export function createMarkdownPreview({
     lastFollowedCursor = { path, line };
     const nextScrollTop = maybeGetScrollTopForLine({ host, line });
     if (nextScrollTop == null || nextScrollTop === host.scrollTop) return false;
-    host.scrollTop = nextScrollTop;
+    scrollPreviewTo(host, nextScrollTop, { smooth: true });
     return true;
   }
 
@@ -133,4 +133,21 @@ export function createMarkdownPreview({
     currentFile: () => (displayedFile ? { ...displayedFile } : null),
     followCursorLine,
   };
+}
+
+function scrollPreviewTo(host, top, { smooth = false } = {}) {
+  if (!Number.isFinite(top)) return;
+  if (smooth && typeof host?.scrollTo === "function" && !prefersReducedMotion()) {
+    host.scrollTo({ top, behavior: "smooth" });
+    return;
+  }
+  host.scrollTop = top;
+}
+
+function prefersReducedMotion() {
+  return Boolean(
+    typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
 }

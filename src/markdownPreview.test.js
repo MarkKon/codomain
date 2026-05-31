@@ -230,6 +230,46 @@ test("follows Neovim cursor line for displayed path only and avoids same-line re
   assert.equal(host.scrollTop, 500);
 });
 
+test("follows Neovim cursor line with smooth scrolling when supported", () => {
+  const handlers = new Map();
+  const scrolls = [];
+  const block = {
+    dataset: { sourceLine: "9" },
+    getBoundingClientRect: () => ({ top: 460, bottom: 520 }),
+  };
+  const host = {
+    innerHTML: "",
+    scrollTop: 120,
+    prepend() {},
+    addEventListener(type, handler) {
+      handlers.set(type, handler);
+    },
+    querySelectorAll(selector) {
+      if (selector === "[data-wikilink]") return [];
+      if (selector === "[data-source-line]") return [block];
+      return [];
+    },
+    getBoundingClientRect: () => ({ top: 100, height: 500 }),
+    scrollTo(options) {
+      scrolls.push(options);
+      this.scrollTop = options.top;
+    },
+  };
+  const preview = createMarkdownPreview({
+    host,
+    renderMath,
+    openWikilink: async () => {
+      throw new Error("unused");
+    },
+  });
+
+  preview.renderFile({ path: "Home.md", content: "Hello" });
+
+  assert.equal(preview.followCursorLine({ path: "Home.md", line: 9 }), true);
+  assert.deepEqual(scrolls, [{ top: 313, behavior: "smooth" }]);
+  assert.equal(host.scrollTop, 313);
+});
+
 test("preview jump suppresses command-induced cursor follows until target line arrives", async () => {
   const handlers = new Map();
   const block = {
