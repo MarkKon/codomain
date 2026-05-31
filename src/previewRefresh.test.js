@@ -163,12 +163,13 @@ test("does not re-trigger transition or sync for duplicate displayed markdown fi
   assert.equal(syncCount, 0);
 });
 
-test("wires buffer-change scheduling and 1s polling to preview refresh controller", async () => {
+test("wires buffer-change scheduling, cursor-line follow, and 1s polling", async () => {
   const listeners = [];
   const intervals = [];
   const controller = {
     scheduleRefresh() {},
     refreshFromActiveMarkdownFile() {},
+    followPreviewCursorLine() {},
   };
 
   await wirePreviewRefresh({
@@ -181,8 +182,116 @@ test("wires buffer-change scheduling and 1s polling to preview refresh controlle
     previewRefresh: controller,
   });
 
-  assert.equal(listeners.length, 1);
+  assert.equal(listeners.length, 2);
   assert.equal(listeners[0][0], "nvim://buffer-changed");
   assert.equal(listeners[0][1], controller.scheduleRefresh);
+  assert.equal(listeners[1][0], "nvim://cursor-line-changed");
+  assert.equal(typeof listeners[1][1], "function");
   assert.deepEqual(intervals, [[controller.refreshFromActiveMarkdownFile, 1000]]);
+});
+
+test("forwards valid matching-path cursor-line events to preview follow layer, including duplicates", () => {
+  const followed = [];
+  const controller = createPreviewRefreshController({
+    readActiveMarkdownFile: async () => null,
+    markdownPreview: {
+      currentPath: () => "Home.md",
+      renderFile: () => false,
+      followCursorLine: (payload) => {
+        followed.push(payload);
+      },
+    },
+  });
+
+  controller.followPreviewCursorLine({ path: "Home.md", line: 7 });
+  controller.followPreviewCursorLine({ path: "Home.md", line: 7 });
+  controller.followPreviewCursorLine({ path: "Home.md", line: 8 });
+  controller.followPreviewCursorLine({ path: "Other.md", line: 8 });
+
+  assert.deepEqual(followed, [
+    { path: "Home.md", line: 7 },
+    { path: "Home.md", line: 7 },
+    { path: "Home.md", line: 8 },
+  ]);
+});
+
+test("replays pending cursor event once when matching file is rendered", () => {
+  const followed = [];
+  let displayedPath = null;
+  const controller = createPreviewRefreshController({
+    readActiveMarkdownFile: async () => null,
+    markdownPreview: {
+      currentPath: () => displayedPath,
+      currentFile: () => (displayedPath ? { path: displayedPath, content: "" } : null),
+      renderFile: (file) => {
+        displayedPath = file.path;
+        return true;
+      },
+      followCursorLine: (payload) => {
+        followed.push(payload);
+        return true;
+      },
+    },
+  });
+
+  controller.followPreviewCursorLine({ path: "Home.md", line: 12 });
+  assert.deepEqual(followed, []);
+
+  controller.applyPreviewFile({ path: "Home.md", content: "# Home" });
+  controller.applyPreviewFile({ path: "Home.md", content: "# Home v2" });
+
+  assert.deepEqual(followed, [{ path: "Home.md", line: 12 }]);
+});
+
+test("replays only latest pending unmatched cursor event", () => {
+  const followed = [];
+  let displayedPath = null;
+  const controller = createPreviewRefreshController({
+    readActiveMarkdownFile: async () => null,
+    markdownPreview: {
+      currentPath: () => displayedPath,
+      currentFile: () => (displayedPath ? { path: displayedPath, content: "" } : null),
+      renderFile: (file) => {
+        displayedPath = file.path;
+        return true;
+      },
+      followCursorLine: (payload) => {
+        followed.push(payload);
+        return true;
+      },
+    },
+  });
+
+  controller.followPreviewCursorLine({ path: "Home.md", line: 21 });
+  controller.followPreviewCursorLine({ path: "Other.md", line: 4 });
+
+  controller.applyPreviewFile({ path: "Home.md", content: "# Home" });
+  assert.deepEqual(followed, []);
+
+  controller.applyPreviewFile({ path: "Other.md", content: "# Other" });
+
+  assert.deepEqual(followed, [{ path: "Other.md", line: 4 }]);
+});
+
+test("wirePreviewRefresh listens for cursor-line change events", async () => {
+  const handlers = new Map();
+  const followed = [];
+  const controller = {
+    scheduleRefresh() {},
+    refreshFromActiveMarkdownFile() {},
+    followPreviewCursorLine(payload) {
+      followed.push(payload);
+    },
+  };
+
+  await wirePreviewRefresh({
+    listenToEvent: async (eventName, handler) => {
+      handlers.set(eventName, handler);
+    },
+    setIntervalFn: () => {},
+    previewRefresh: controller,
+  });
+
+  handlers.get("nvim://cursor-line-changed")({ payload: { path: "Home.md", line: 8 } });
+  assert.deepEqual(followed, [{ path: "Home.md", line: 8 }]);
 });

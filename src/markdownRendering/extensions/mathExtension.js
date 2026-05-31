@@ -41,6 +41,7 @@ export function installMathExtension(markdown, renderMath) {
           const token = state.push("codomain_math_block", "math", 0);
           token.block = true;
           token.content = trimmedFirstLine.slice(2, -2);
+          token.map = [startLine, startLine + 1];
         }
         state.line = startLine + 1;
         return true;
@@ -59,6 +60,7 @@ export function installMathExtension(markdown, renderMath) {
               state.getLines(startLine + 1, nextLine, 0, false).replace(/\n$/, ""),
               state.tShift[startLine],
             );
+            token.map = [startLine, nextLine + 1];
           }
           state.line = nextLine + 1;
           return true;

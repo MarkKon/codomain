@@ -4,7 +4,8 @@ mod root_folder_markdown_files;
 use active_markdown_file::{ActiveBufferAdapter, ActiveMarkdownFileBehavior};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use rmpv::{decode::read_value, encode::write_value, Value};
-use root_folder_markdown_files::{MarkdownFile, RootFolderMarkdownFiles};
+use root_folder_markdown_files::{MarkdownFile, ReadMarkdownError, RootFolderMarkdownFiles};
+use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
@@ -50,6 +51,12 @@ struct NeovimSessions {
 struct AppState {
     neovim: NeovimSessions,
     zoom: Mutex<f64>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+struct CursorLineChangedEvent {
+    path: String,
+    line: u64,
 }
 
 impl Default for AppState {
@@ -128,7 +135,7 @@ impl NeovimSessions {
 
         let writer = pair.master.take_writer().map_err(|err| err.to_string())?;
         let rpc = NvimRpc::connect(&listen_path, app)?;
-        install_codomain_autocmds(&rpc)?;
+        install_codomain_autocmds(&rpc, &root)?;
 
         *session = Some(NvimSession {
             root,
@@ -235,6 +242,21 @@ impl NeovimSessions {
         self.active_markdown_file()?
             .ok_or_else(|| format!("opened {path}, but it is not an active Markdown buffer"))
     }
+
+    fn move_cursor_to_markdown_line(&self, path: &str, line: u64) -> Result<(), String> {
+        if Path::new(path).extension().and_then(|ext| ext.to_str()) != Some("md") {
+            return Err("path must point to a markdown file".to_string());
+        }
+
+        let (root, rpc) = {
+            let session = self.session.lock().map_err(|err| err.to_string())?;
+            let session = session
+                .as_ref()
+                .ok_or_else(|| "neovim has not been started".to_string())?;
+            (session.root.clone(), Arc::clone(&session.rpc))
+        };
+        move_cursor_to_markdown_line_with_adapter(&root, rpc.as_ref(), path, line)
+    }
 }
 
 type PendingResponse = mpsc::Sender<Result<Value, String>>;
@@ -243,6 +265,10 @@ struct NvimRpc {
     writer: Mutex<UnixStream>,
     pending: Mutex<HashMap<u64, PendingResponse>>,
     next_request_id: AtomicU64,
+}
+
+trait NeovimCommandAdapter {
+    fn request(&self, method: &str, params: Vec<Value>) -> Result<Value, String>;
 }
 
 impl NvimRpc {
@@ -305,6 +331,12 @@ impl NvimRpc {
         receiver
             .recv_timeout(Duration::from_secs(2))
             .map_err(|err| err.to_string())?
+    }
+}
+
+impl NeovimCommandAdapter for NvimRpc {
+    fn request(&self, method: &str, params: Vec<Value>) -> Result<Value, String> {
+        NvimRpc::request(self, method, params)
     }
 }
 
@@ -373,29 +405,95 @@ fn handle_rpc_notification(items: &[Value], app: &tauri::AppHandle) {
 
     if method == "codomain_buffer_changed" {
         let _ = app.emit("nvim://buffer-changed", ());
+    } else if method == "codomain_cursor_line_changed" {
+        let params = items.get(2).unwrap_or(&Value::Nil);
+        if let Some(payload) = cursor_line_changed_event_payload(params) {
+            let _ = app.emit("nvim://cursor-line-changed", payload);
+        }
     }
 }
 
-fn install_codomain_autocmds(rpc: &NvimRpc) -> Result<(), String> {
+fn install_codomain_autocmds(rpc: &NvimRpc, root: &Path) -> Result<(), String> {
     let api_info = rpc.request("nvim_get_api_info", vec![])?;
     let channel_id = api_info
         .as_array()
         .and_then(|items| items.first())
         .and_then(Value::as_u64)
         .ok_or_else(|| "Neovim did not return an RPC channel id".to_string())?;
-    let lua = format!(
+    let lua = build_codomain_autocmd_lua(channel_id, root);
+
+    let _ = rpc.request(
+        "nvim_exec_lua",
+        vec![Value::from(lua), Value::Array(vec![])],
+    )?;
+    Ok(())
+}
+
+fn build_codomain_autocmd_lua(channel_id: u64, root: &Path) -> String {
+    let root_literal = format!("{:?}", root.to_string_lossy());
+    format!(
         r#"
 local channel = {channel_id}
-local group = vim.api.nvim_create_augroup("CodomainBufferSync", {{ clear = true }})
-local function notify_codomain()
+local root = {root_literal}
+local group = vim.api.nvim_create_augroup("CodomainAppEvents", {{ clear = true }})
+local normalized_root = (vim.loop.fs_realpath(root) or root):gsub("\\", "/")
+if normalized_root:sub(-1) ~= "/" then
+  normalized_root = normalized_root .. "/"
+end
+
+local function notify_codomain_buffer_changed()
   vim.schedule(function()
     pcall(vim.rpcnotify, channel, "codomain_buffer_changed")
   end)
 end
+
+local function markdown_relative_path_under_root(path)
+  if path == "" then
+    return nil
+  end
+  if vim.fn.fnamemodify(path, ":e") ~= "md" then
+    return nil
+  end
+  local normalized_path = (vim.loop.fs_realpath(path) or path):gsub("\\", "/")
+  if normalized_path:sub(1, #normalized_root) ~= normalized_root then
+    return nil
+  end
+  local relative_path = normalized_path:sub(#normalized_root + 1)
+  return relative_path
+end
+
+local last_cursor_path = nil
+local last_cursor_line = nil
+local function notify_codomain_cursor_line_changed()
+  vim.schedule(function()
+    local path = vim.api.nvim_buf_get_name(0)
+    local relative_path = markdown_relative_path_under_root(path)
+    if relative_path == nil then
+      return
+    end
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local line = tonumber(cursor[1]) or 1
+    if line < 1 then
+      line = 1
+    end
+    if relative_path == last_cursor_path and line == last_cursor_line then
+      return
+    end
+    last_cursor_path = relative_path
+    last_cursor_line = line
+    pcall(vim.rpcnotify, channel, "codomain_cursor_line_changed", relative_path, line)
+  end)
+end
+
 vim.api.nvim_create_autocmd({{ "BufEnter", "BufWritePost", "TextChanged", "TextChangedI" }}, {{
   group = group,
-  callback = notify_codomain,
+  callback = notify_codomain_buffer_changed,
 }})
+vim.api.nvim_create_autocmd({{ "CursorMoved", "CursorMovedI", "BufEnter" }}, {{
+  group = group,
+  callback = notify_codomain_cursor_line_changed,
+}})
+
 vim.g.codomain = true
 vim.opt.mouse = "a"
 local function keep_markdown_plain()
@@ -421,15 +519,17 @@ vim.schedule(function()
     keep_markdown_plain()
   end
 end)
-notify_codomain()
+notify_codomain_buffer_changed()
+notify_codomain_cursor_line_changed()
 "#
-    );
+    )
+}
 
-    let _ = rpc.request(
-        "nvim_exec_lua",
-        vec![Value::from(lua), Value::Array(vec![])],
-    )?;
-    Ok(())
+fn cursor_line_changed_event_payload(params: &Value) -> Option<CursorLineChangedEvent> {
+    let items = params.as_array()?;
+    let path = items.first().and_then(value_as_str)?.to_string();
+    let line = items.get(1).and_then(Value::as_u64)?.max(1);
+    Some(CursorLineChangedEvent { path, line })
 }
 
 fn value_as_str(value: &Value) -> Option<&str> {
@@ -510,7 +610,13 @@ fn resize_neovim(app: tauri::AppHandle, rows: u16, cols: u16) -> Result<(), Stri
 
 #[tauri::command]
 fn read_markdown(root: String, path: String) -> Result<MarkdownFile, String> {
-    RootFolderMarkdownFiles::new(root)?.read(&path)
+    let markdown_files = RootFolderMarkdownFiles::new(root)?;
+    markdown_files
+        .read_with_classification(&path)
+        .map_err(|error| match error {
+            ReadMarkdownError::NotFound => format!("READ_MARKDOWN_NOT_FOUND:{path}"),
+            ReadMarkdownError::Message(message) => message,
+        })
 }
 
 #[tauri::command]
@@ -545,6 +651,16 @@ fn open_markdown_in_neovim(app: tauri::AppHandle, path: String) -> Result<Markdo
 }
 
 #[tauri::command]
+fn move_neovim_cursor_to_markdown_line(
+    app: tauri::AppHandle,
+    path: String,
+    line: u64,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    state.neovim.move_cursor_to_markdown_line(&path, line)
+}
+
+#[tauri::command]
 fn zoom_in(app: tauri::AppHandle) {
     set_app_zoom(&app, ZOOM_STEP);
 }
@@ -565,6 +681,48 @@ fn vim_single_quote_escape(value: &str) -> String {
 
 fn applescript_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn move_cursor_to_markdown_line_with_adapter(
+    root: &Path,
+    adapter: &dyn NeovimCommandAdapter,
+    path: &str,
+    line: u64,
+) -> Result<(), String> {
+    if Path::new(path).extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return Err("path must point to a markdown file".to_string());
+    }
+
+    let markdown_files = RootFolderMarkdownFiles::new(root)?;
+    let file_path = markdown_files.resolve_inside_root(path)?;
+    let expression = format!(
+        "execute('edit ' . fnameescape('{}'))",
+        vim_single_quote_escape(&file_path.to_string_lossy())
+    );
+    let _ = adapter.request("nvim_eval", vec![Value::from(expression)])?;
+
+    let current_buffer = adapter.request("nvim_get_current_buf", vec![])?;
+    let buffer_line_count = adapter.request("nvim_buf_line_count", vec![current_buffer])?;
+    let line_count = buffer_line_count
+        .as_u64()
+        .ok_or_else(|| "Neovim did not return a buffer line count".to_string())?;
+    let bounded_line = clamp_markdown_line(line, line_count);
+
+    let _ = adapter.request(
+        "nvim_win_set_cursor",
+        vec![
+            Value::from(0),
+            Value::Array(vec![Value::from(bounded_line), Value::from(0)]),
+        ],
+    )?;
+
+    Ok(())
+}
+
+fn clamp_markdown_line(requested_line: u64, line_count: u64) -> u64 {
+    let requested = requested_line.max(1);
+    let max_line = line_count.max(1);
+    requested.min(max_line)
 }
 
 impl Drop for NvimSession {
@@ -589,6 +747,7 @@ pub fn run() {
             resolve_wikilink,
             open_wikilink_in_neovim,
             open_markdown_in_neovim,
+            move_neovim_cursor_to_markdown_line,
             zoom_in,
             zoom_out,
             reset_zoom
@@ -734,6 +893,88 @@ fn emit_view_mode(app: &tauri::AppHandle, mode: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Mutex,
+        },
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    struct TempRoot {
+        path: PathBuf,
+    }
+
+    impl TempRoot {
+        fn new() -> Self {
+            let id = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos();
+            let count = NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "codomain-lib-test-{}-{id}-{count}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).expect("test root should be created");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn write_file(&self, relative: &str, content: &str) {
+            let path = self.path.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("test parent directories should be created");
+            }
+            fs::write(path, content).expect("test file should be written");
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeNeovimCommandAdapter {
+        calls: Mutex<Vec<(String, Vec<Value>)>>,
+        line_count: u64,
+    }
+
+    impl FakeNeovimCommandAdapter {
+        fn with_line_count(line_count: u64) -> Self {
+            Self {
+                calls: Mutex::new(vec![]),
+                line_count,
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, Vec<Value>)> {
+            self.calls.lock().expect("calls lock").clone()
+        }
+    }
+
+    impl NeovimCommandAdapter for FakeNeovimCommandAdapter {
+        fn request(&self, method: &str, params: Vec<Value>) -> Result<Value, String> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push((method.to_string(), params));
+            match method {
+                "nvim_get_current_buf" => Ok(Value::from(11)),
+                "nvim_buf_line_count" => Ok(Value::from(self.line_count)),
+                _ => Ok(Value::Nil),
+            }
+        }
+    }
 
     #[test]
     fn neovim_sessions_reject_write_when_not_started() {
@@ -764,5 +1005,138 @@ mod tests {
             .open_markdown_path("Notes.txt")
             .expect_err("non-markdown path should be rejected before session checks");
         assert_eq!(error, "path must point to a markdown file");
+    }
+
+    #[test]
+    fn neovim_move_cursor_to_markdown_line_rejects_non_markdown() {
+        let sessions = NeovimSessions::default();
+        let error = sessions
+            .move_cursor_to_markdown_line("Notes.txt", 4)
+            .expect_err("non-markdown path should be rejected before session checks");
+        assert_eq!(error, "path must point to a markdown file");
+    }
+
+    #[test]
+    fn cursor_line_changed_event_payload_requires_path_and_line() {
+        let payload = cursor_line_changed_event_payload(&Value::Array(vec![
+            Value::from("/tmp/Note.md"),
+            Value::from(42_u64),
+        ]))
+        .expect("valid payload should parse");
+
+        assert_eq!(
+            payload,
+            CursorLineChangedEvent {
+                path: "/tmp/Note.md".to_string(),
+                line: 42
+            }
+        );
+        assert!(
+            cursor_line_changed_event_payload(&Value::Array(vec![Value::from("/tmp/Note.md")]))
+                .is_none()
+        );
+        assert!(cursor_line_changed_event_payload(&Value::Array(vec![
+            Value::from("/tmp/Note.md"),
+            Value::from("42")
+        ]))
+        .is_none());
+    }
+
+    #[test]
+    fn clamp_markdown_line_stays_inside_buffer_bounds() {
+        assert_eq!(clamp_markdown_line(0, 10), 1);
+        assert_eq!(clamp_markdown_line(4, 10), 4);
+        assert_eq!(clamp_markdown_line(99, 10), 10);
+        assert_eq!(clamp_markdown_line(7, 0), 1);
+    }
+
+    #[test]
+    fn codomain_autocmd_lua_separates_buffer_and_cursor_notifications() {
+        let lua = build_codomain_autocmd_lua(17, Path::new("/tmp/codomain"));
+
+        assert!(lua.contains("codomain_buffer_changed"));
+        assert!(lua.contains("codomain_cursor_line_changed"));
+        assert!(lua.contains("local relative_path = normalized_path:sub(#normalized_root + 1)"));
+        assert!(lua.contains(
+            "pcall(vim.rpcnotify, channel, \"codomain_cursor_line_changed\", relative_path, line)"
+        ));
+        assert!(lua.contains("\"CursorMoved\""));
+        assert!(lua.contains("\"CursorMovedI\""));
+        assert!(
+            lua.contains("if relative_path == last_cursor_path and line == last_cursor_line then")
+        );
+        assert!(lua.contains("vim.fn.fnamemodify(path, \":e\") ~= \"md\""));
+    }
+
+    #[test]
+    fn move_cursor_to_markdown_line_rejects_path_outside_root_folder() {
+        let root = TempRoot::new();
+        let outside = TempRoot::new();
+        outside.write_file("Outside.md", "outside");
+        let outside_dir = outside
+            .path()
+            .file_name()
+            .expect("outside file name")
+            .to_string_lossy()
+            .to_string();
+        let escape_path = format!("../{outside_dir}/Outside.md");
+        let adapter = FakeNeovimCommandAdapter::with_line_count(20);
+
+        let error =
+            move_cursor_to_markdown_line_with_adapter(root.path(), &adapter, &escape_path, 3)
+                .expect_err("paths outside root should be rejected");
+
+        assert_eq!(error, "path escapes the root folder");
+        assert!(adapter.calls().is_empty());
+    }
+
+    #[test]
+    fn move_cursor_to_markdown_line_activates_file_and_sets_clamped_cursor() {
+        let root = TempRoot::new();
+        root.write_file("Folder/Doc's.md", "one\ntwo\nthree");
+        let adapter = FakeNeovimCommandAdapter::with_line_count(3);
+
+        move_cursor_to_markdown_line_with_adapter(root.path(), &adapter, "Folder/Doc's.md", 99)
+            .expect("move cursor should succeed");
+
+        let calls = adapter.calls();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].0, "nvim_eval");
+        let edit_expression = calls[0].1[0]
+            .as_str()
+            .expect("edit expression should be string");
+        assert!(edit_expression.contains("execute('edit ' . fnameescape('"));
+        assert!(edit_expression.contains("Doc''s.md"));
+        assert_eq!(calls[1].0, "nvim_get_current_buf");
+        assert_eq!(calls[2].0, "nvim_buf_line_count");
+        assert_eq!(calls[2].1, vec![Value::from(11)]);
+        assert_eq!(calls[3].0, "nvim_win_set_cursor");
+        assert_eq!(
+            calls[3].1,
+            vec![
+                Value::from(0),
+                Value::Array(vec![Value::from(3_u64), Value::from(0_u64)])
+            ]
+        );
+    }
+
+    #[test]
+    fn move_cursor_to_markdown_line_clamps_zero_to_first_line() {
+        let root = TempRoot::new();
+        root.write_file("Note.md", "one\ntwo");
+        let adapter = FakeNeovimCommandAdapter::with_line_count(20);
+
+        move_cursor_to_markdown_line_with_adapter(root.path(), &adapter, "Note.md", 0)
+            .expect("move cursor should succeed");
+
+        let calls = adapter.calls();
+        assert_eq!(calls[3].0, "nvim_win_set_cursor");
+        assert_eq!(
+            calls[3].1,
+            vec![
+                Value::from(0),
+                Value::Array(vec![Value::from(1_u64), Value::from(0_u64)])
+            ]
+        );
     }
 }

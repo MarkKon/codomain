@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Serialize, Clone)]
@@ -10,6 +11,11 @@ pub(crate) struct MarkdownFile {
 
 pub(crate) struct RootFolderMarkdownFiles {
     root: PathBuf,
+}
+
+pub(crate) enum ReadMarkdownError {
+    NotFound,
+    Message(String),
 }
 
 impl RootFolderMarkdownFiles {
@@ -26,9 +32,18 @@ impl RootFolderMarkdownFiles {
         &self.root
     }
 
+    #[allow(dead_code)]
     pub(crate) fn read(&self, relative: &str) -> Result<MarkdownFile, String> {
         let file_path = self.resolve_inside_root(relative)?;
         self.read_canonical(&file_path)
+    }
+
+    pub(crate) fn read_with_classification(
+        &self,
+        relative: &str,
+    ) -> Result<MarkdownFile, ReadMarkdownError> {
+        let file_path = self.resolve_inside_root_with_classification(relative)?;
+        self.read_canonical_with_classification(&file_path)
     }
 
     pub(crate) fn read_canonical(&self, file_path: &Path) -> Result<MarkdownFile, String> {
@@ -38,6 +53,27 @@ impl RootFolderMarkdownFiles {
 
         let content = fs::read_to_string(file_path).map_err(|err| err.to_string())?;
         let relative = self.relative_path(file_path)?;
+
+        Ok(MarkdownFile {
+            path: relative,
+            content,
+        })
+    }
+
+    fn read_canonical_with_classification(
+        &self,
+        file_path: &Path,
+    ) -> Result<MarkdownFile, ReadMarkdownError> {
+        if !file_path.starts_with(&self.root) {
+            return Err(ReadMarkdownError::Message(
+                "path escapes the root folder".to_string(),
+            ));
+        }
+
+        let content = fs::read_to_string(file_path).map_err(classify_read_error)?;
+        let relative = self
+            .relative_path(file_path)
+            .map_err(ReadMarkdownError::Message)?;
 
         Ok(MarkdownFile {
             path: relative,
@@ -119,6 +155,37 @@ impl RootFolderMarkdownFiles {
         Ok(canonical)
     }
 
+    fn resolve_inside_root_with_classification(
+        &self,
+        relative: &str,
+    ) -> Result<PathBuf, ReadMarkdownError> {
+        let path = Path::new(relative);
+        if path.is_absolute() {
+            return Err(ReadMarkdownError::Message(
+                "absolute paths are not allowed".to_string(),
+            ));
+        }
+
+        for component in path.components() {
+            if matches!(component, Component::Prefix(_) | Component::RootDir) {
+                return Err(ReadMarkdownError::Message(
+                    "path must stay inside the root folder".to_string(),
+                ));
+            }
+        }
+
+        let resolved = self.root.join(path);
+        let canonical = fs::canonicalize(&resolved).map_err(classify_read_error)?;
+
+        if !canonical.starts_with(&self.root) {
+            return Err(ReadMarkdownError::Message(
+                "path escapes the root folder".to_string(),
+            ));
+        }
+
+        Ok(canonical)
+    }
+
     pub(crate) fn relative_path(&self, file_path: &Path) -> Result<String, String> {
         file_path
             .strip_prefix(&self.root)
@@ -135,6 +202,13 @@ fn normalize_wikilink_target(target: &str) -> Result<&str, String> {
     }
 
     Ok(target)
+}
+
+fn classify_read_error(error: std::io::Error) -> ReadMarkdownError {
+    if error.kind() == ErrorKind::NotFound {
+        return ReadMarkdownError::NotFound;
+    }
+    ReadMarkdownError::Message(error.to_string())
 }
 
 #[cfg(test)]
