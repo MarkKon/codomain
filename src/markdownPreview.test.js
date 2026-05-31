@@ -230,7 +230,7 @@ test("follows Neovim cursor line for displayed path only and avoids same-line re
   assert.equal(host.scrollTop, 500);
 });
 
-test("preview jump suppresses immediate same-line follow after Neovim cursor move", async () => {
+test("preview jump suppresses command-induced cursor follows until target line arrives", async () => {
   const handlers = new Map();
   const block = {
     dataset: { sourceLine: "14" },
@@ -267,6 +267,8 @@ test("preview jump suppresses immediate same-line follow after Neovim cursor mov
     },
   });
 
+  assert.equal(preview.followCursorLine({ path: "Home.md", line: 4 }), false);
+  assert.equal(host.scrollTop, 100);
   assert.equal(preview.followCursorLine({ path: "Home.md", line: 14 }), false);
   assert.equal(host.scrollTop, 100);
   assert.equal(preview.followCursorLine({ path: "Home.md", line: 15 }), true);

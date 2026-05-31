@@ -87,9 +87,11 @@ export function createMarkdownPreview({
   function followCursorLine({ path, line } = {}) {
     if (!displayedFile || typeof path !== "string" || !Number.isInteger(line) || line < 1) return false;
     if (displayedFile.path !== path) return false;
-    if (suppressedFollowTarget && suppressedFollowTarget.path === path && suppressedFollowTarget.line === line) {
-      suppressedFollowTarget = null;
-      lastFollowedCursor = { path, line };
+    if (suppressedFollowTarget && suppressedFollowTarget.path === path) {
+      if (suppressedFollowTarget.line === line) {
+        suppressedFollowTarget = null;
+        lastFollowedCursor = { path, line };
+      }
       return false;
     }
     if (lastFollowedCursor && lastFollowedCursor.path === path && lastFollowedCursor.line === line) return false;
@@ -115,6 +117,7 @@ export function createMarkdownPreview({
       try {
         await moveCursorToSourceLine(displayedFile.path, block.startLine);
       } catch (error) {
+        suppressedFollowTarget = null;
         showError(`Could not move cursor to line ${block.startLine}`, error);
       }
     });
