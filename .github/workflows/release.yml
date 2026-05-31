@@ -102,6 +102,7 @@ jobs:
             end
 
             app "Codomain.app"
+            binary "#{appdir}/Codomain.app/Contents/Resources/codomain"
 
             zap trash: [
               "~/Library/Application Support/dev.codomain.desktop",

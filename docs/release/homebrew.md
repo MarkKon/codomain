@@ -25,6 +25,13 @@ brew tap MarkKon/codomain
 brew install --cask codomain
 ```
 
+Then launch Codomain for a folder:
+
+```sh
+codomain .
+codomain ~/notes
+```
+
 Users can update with:
 
 ```sh

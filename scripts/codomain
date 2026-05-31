@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+ROOT="${1:-$PWD}"
+if [ ! -d "$ROOT" ]; then
+  echo "codomain: not a directory: $ROOT" >&2
+  exit 1
+fi
+ROOT="$(cd "$ROOT" && pwd -P)"
+
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+  DIR="$(CDPATH= cd -P "$(dirname "$SOURCE")" && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in
+    /*) SOURCE="$TARGET" ;;
+    *) SOURCE="$DIR/$TARGET" ;;
+  esac
+done
+
+APP_DIR="$(CDPATH= cd -P "$(dirname "$SOURCE")" && pwd)"
+while [ "$APP_DIR" != "/" ] && [ "${APP_DIR##*.}" != "app" ]; do
+  APP_DIR="$(dirname "$APP_DIR")"
+done
+
+if [ "${APP_DIR##*.}" != "app" ]; then
+  APP_DIR="/Applications/Codomain.app"
+fi
+
+open -na "$APP_DIR" --args "$ROOT"

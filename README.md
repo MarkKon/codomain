@@ -29,6 +29,13 @@ You can also run the built binary directly from any folder:
 src-tauri/target/release/codomain .
 ```
 
+After installing through Homebrew, launch Codomain for a folder with:
+
+```sh
+codomain .
+codomain ~/notes
+```
+
 ## Release
 
 Pushing a `v*` tag builds and publishes an unsigned universal macOS DMG through GitHub Actions.
