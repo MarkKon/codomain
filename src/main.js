@@ -84,6 +84,7 @@ const markdownPreview = createMarkdownPreview({
   renderMath,
   openWikilink: ({ fromPath, target }) =>
     invoke("open_wikilink_in_neovim", { fromPath, target }),
+  openExternalLink: (url) => invoke("open_external_link", { url }),
   moveCursorToSourceLine: (path, line) => invoke("move_neovim_cursor_to_markdown_line", { path, line }),
   onPathTransition: (previousPath, nextPath, details) => {
     previewNavigation.recordTransition(previousPath, nextPath, details);

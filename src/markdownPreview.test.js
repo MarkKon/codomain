@@ -104,6 +104,74 @@ test("wikilink navigation reports path transitions to app shell", async () => {
   assert.deepEqual(transitions, [["Home.md", "Target.md"]]);
 });
 
+test("external markdown links open in the external browser instead of the app webview", async () => {
+  const listeners = [];
+  const link = {
+    getAttribute: (name) => (name === "href" ? "https://example.com/path" : null),
+    addEventListener: (_type, handler) => listeners.push(handler),
+  };
+  const host = {
+    innerHTML: "",
+    scrollTop: 0,
+    prepend() {},
+    querySelectorAll(selector) {
+      if (selector === "[data-wikilink]") return [];
+      if (selector === "a[href]:not([data-wikilink])") return [link];
+      return [];
+    },
+  };
+  const opened = [];
+  const preview = createMarkdownPreview({
+    host,
+    renderMath,
+    openWikilink: async () => {
+      throw new Error("unused");
+    },
+    openExternalLink: async (href) => opened.push(href),
+  });
+
+  preview.renderFile({ path: "Home.md", content: "[Example](https://example.com/path)" });
+  let defaultPrevented = false;
+  await listeners[0]({ preventDefault: () => (defaultPrevented = true) });
+
+  assert.equal(defaultPrevented, true);
+  assert.deepEqual(opened, ["https://example.com/path"]);
+});
+
+test("relative markdown links are left to normal preview handling", async () => {
+  const listeners = [];
+  const link = {
+    getAttribute: (name) => (name === "href" ? "relative.md" : null),
+    addEventListener: (_type, handler) => listeners.push(handler),
+  };
+  const host = {
+    innerHTML: "",
+    scrollTop: 0,
+    prepend() {},
+    querySelectorAll(selector) {
+      if (selector === "[data-wikilink]") return [];
+      if (selector === "a[href]:not([data-wikilink])") return [link];
+      return [];
+    },
+  };
+  const opened = [];
+  const preview = createMarkdownPreview({
+    host,
+    renderMath,
+    openWikilink: async () => {
+      throw new Error("unused");
+    },
+    openExternalLink: async (href) => opened.push(href),
+  });
+
+  preview.renderFile({ path: "Home.md", content: "[Relative](relative.md)" });
+  let defaultPrevented = false;
+  await listeners[0]({ preventDefault: () => (defaultPrevented = true) });
+
+  assert.equal(defaultPrevented, false);
+  assert.deepEqual(opened, []);
+});
+
 test("dblclick on mapped preview content jumps Neovim cursor to mapped source line", async () => {
   const handlers = new Map();
   const mappedBlock = {

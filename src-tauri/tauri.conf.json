@@ -32,7 +32,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": ["app"],
     "resources": {
       "../scripts/codomain": "codomain"
     },

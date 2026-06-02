@@ -16,11 +16,10 @@ Build the macOS app bundle:
 PATH="/Users/kmark/.cargo/bin:$PATH" npm run tauri:build
 ```
 
-The release build writes the app bundle and DMG:
+The release build writes the app bundle:
 
 ```text
 src-tauri/target/release/bundle/macos/Codomain.app
-src-tauri/target/release/bundle/dmg/
 ```
 
 You can also run the built binary directly from any folder:
@@ -29,7 +28,20 @@ You can also run the built binary directly from any folder:
 src-tauri/target/release/codomain .
 ```
 
-After installing through Homebrew, launch Codomain for a folder with:
+Install locally for your user account:
+
+```sh
+npm run install:local
+```
+
+This installs:
+
+```text
+~/Applications/Codomain.app
+~/.local/bin/codomain
+```
+
+Launch Codomain from Finder/Launchpad, or launch it for a folder from the shell:
 
 ```sh
 codomain .
@@ -38,9 +50,8 @@ codomain ~/notes
 
 ## Release
 
-Pushing a `v*` tag builds and publishes an unsigned universal macOS DMG through GitHub Actions.
-The same workflow updates the Homebrew cask in `MarkKon/homebrew-codomain`.
-See `docs/release/dmg.md` and `docs/release/homebrew.md` for the release checklist.
+Codomain is currently installed locally for the active user rather than published through Homebrew.
+See `docs/release/local-install.md` for the local install workflow.
 
 ## Controls
 

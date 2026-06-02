@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+REPO_ROOT="$(CDPATH= cd -P "$(dirname "$0")/.." && pwd)"
+APP_NAME="Codomain.app"
+INSTALL_DIR="${CODOMAIN_APP_DIR:-$HOME/Applications}"
+BIN_DIR="${CODOMAIN_BIN_DIR:-$HOME/.local/bin}"
+APP_SOURCE="$REPO_ROOT/src-tauri/target/release/bundle/macos/$APP_NAME"
+APP_DEST="$INSTALL_DIR/$APP_NAME"
+SIGN_IDENTITY="${CODOMAIN_CODESIGN_IDENTITY:--}"
+
+cd "$REPO_ROOT"
+
+PATH="$HOME/.cargo/bin:$PATH" npm run tauri:build -- --bundles app
+
+mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+rm -rf "$APP_DEST"
+ditto "$APP_SOURCE" "$APP_DEST"
+
+if command -v xattr >/dev/null 2>&1; then
+  xattr -dr com.apple.quarantine "$APP_DEST" 2>/dev/null || true
+fi
+
+codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DEST"
+
+ln -sf "$APP_DEST/Contents/Resources/codomain" "$BIN_DIR/codomain"
+
+cat <<EOF
+Installed $APP_DEST
+Installed $BIN_DIR/codomain
+
+Add this to your shell profile if needed:
+  export PATH="\$HOME/.local/bin:\$PATH"
+
+Launch from Finder/Launchpad:
+  $APP_DEST
+
+Launch from shell:
+  codomain .
+  codomain ~/notes
+EOF

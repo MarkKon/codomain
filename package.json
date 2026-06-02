@@ -9,7 +9,8 @@
     "build": "vite build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "install:local": "scripts/install-local"
   },
   "dependencies": {
     "@tauri-apps/cli": "^2.0.0",

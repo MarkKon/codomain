@@ -703,6 +703,19 @@ fn reset_zoom(app: tauri::AppHandle) {
     reset_app_zoom(&app);
 }
 
+#[tauri::command]
+fn open_external_link(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:"))
+    {
+        return Err("only external http, https, and mailto links can be opened".to_string());
+    }
+    open_url_in_external_browser(trimmed)
+}
+
 fn vim_single_quote_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "''")
 }
@@ -753,6 +766,41 @@ fn clamp_markdown_line(requested_line: u64, line_count: u64) -> u64 {
     requested.min(max_line)
 }
 
+#[cfg(target_os = "macos")]
+fn open_url_in_external_browser(url: &str) -> Result<(), String> {
+    Command::new("open")
+        .arg(url)
+        .status()
+        .map_err(|err| err.to_string())
+        .and_then(command_status_to_result)
+}
+
+#[cfg(target_os = "windows")]
+fn open_url_in_external_browser(url: &str) -> Result<(), String> {
+    Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .status()
+        .map_err(|err| err.to_string())
+        .and_then(command_status_to_result)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_url_in_external_browser(url: &str) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(url)
+        .status()
+        .map_err(|err| err.to_string())
+        .and_then(command_status_to_result)
+}
+
+fn command_status_to_result(status: std::process::ExitStatus) -> Result<(), String> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("external opener exited with status {status}"))
+    }
+}
+
 impl Drop for NvimSession {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -778,7 +826,8 @@ pub fn run() {
             move_neovim_cursor_to_markdown_line,
             zoom_in,
             zoom_out,
-            reset_zoom
+            reset_zoom,
+            open_external_link
         ])
         .manage(AppState::default())
         .run(tauri::generate_context!())

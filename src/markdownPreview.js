@@ -6,6 +6,7 @@ export function createMarkdownPreview({
   host,
   renderMath,
   openWikilink,
+  openExternalLink,
   onPathTransition,
   moveCursorToSourceLine,
 }) {
@@ -43,6 +44,7 @@ export function createMarkdownPreview({
     suppressedFollowTarget = null;
     host.innerHTML = markdownRendering.render(file.content);
     bindWikilinks();
+    bindExternalLinks();
     if (options.scrollToTop) host.scrollTop = 0;
     return true;
   }
@@ -79,6 +81,22 @@ export function createMarkdownPreview({
           }
         } catch (error) {
           showError(`Could not open [[${target}]]`, error);
+        }
+      });
+    });
+  }
+
+  function bindExternalLinks() {
+    if (typeof openExternalLink !== "function") return;
+    host.querySelectorAll("a[href]:not([data-wikilink])").forEach((link) => {
+      link.addEventListener("click", async (event) => {
+        const href = link.getAttribute("href");
+        if (!isExternalHref(href)) return;
+        event.preventDefault();
+        try {
+          await openExternalLink(href);
+        } catch (error) {
+          showError(`Could not open ${href}`, error);
         }
       });
     });
@@ -133,6 +151,11 @@ export function createMarkdownPreview({
     currentFile: () => (displayedFile ? { ...displayedFile } : null),
     followCursorLine,
   };
+}
+
+function isExternalHref(href) {
+  if (typeof href !== "string") return false;
+  return /^(https?|mailto):/i.test(href.trim());
 }
 
 function scrollPreviewTo(host, top, { smooth = false } = {}) {

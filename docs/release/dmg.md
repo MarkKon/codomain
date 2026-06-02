@@ -1,20 +1,28 @@
-# DMG Releases
+# App Bundle Releases
 
-Codomain is currently distributed as a macOS DMG.
+Codomain is currently installed locally as a macOS app bundle.
 
 ## Local Build
 
 ```sh
-PATH="$HOME/.cargo/bin:$PATH" npm run tauri:build
+PATH="$HOME/.cargo/bin:$PATH" npm run tauri:build -- --bundles app
 ```
 
-The DMG is written to:
+The app bundle is written to:
 
 ```text
-src-tauri/target/release/bundle/dmg/
+src-tauri/target/release/bundle/macos/Codomain.app
 ```
 
-## GitHub Release And Homebrew
+## Local Install
+
+```sh
+npm run install:local
+```
+
+This installs `~/Applications/Codomain.app` and links `~/.local/bin/codomain`.
+
+## GitHub Release
 
 1. Update the version in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`.
 2. Commit the version bump.
@@ -25,9 +33,7 @@ src-tauri/target/release/bundle/dmg/
    git push origin v0.1.0
    ```
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, builds a universal macOS DMG, attaches it to a GitHub Release, and updates the Homebrew cask in `MarkKon/homebrew-codomain`.
-
-See `docs/release/homebrew.md` for Homebrew setup and release operations.
+Pushing a `v*` tag runs `.github/workflows/release.yml`, builds a universal macOS app bundle, and attaches a zipped app bundle to a GitHub Release.
 
 ## Neovim
 
